@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+python-dotenv
+httpx
+requests
+alembic
+redis
+celery
+python-dateutil
+pydantic
+python-multipart
+pytz
+cryptography
+dateparser

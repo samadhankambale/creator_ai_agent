@@ -1,42 +1,45 @@
-from fastapi import APIRouter
-from fastapi import Request
-
-from fastapi.responses import (
-    PlainTextResponse
+from fastapi import (
+    APIRouter,
+    Request,
+    Depends
 )
+import traceback 
+from sqlalchemy.orm import Session
 
-from app.core.config import settings
-
-from app.services.post_service import (
-    create_post
-)
-
-from app.services.publishing_service import (
-    publish_service
+from app.database.dependencies import (
+    get_db
 )
 
 from app.integrations.whatsapp.whatsapp_client import (
     send_message,
-    send_platform_buttons
+    send_image,
+    send_buttons,
+    send_list_message
 )
 
-from app.integrations.instagram.instagram_client import (
-    post_to_instagram
+from app.services.post_service import (
+    post_service
 )
 
-from app.integrations.linkedin.linkedin_client import (
-    post_to_linkedin
+from app.services.session_service import (
+    session_service
+)
+
+from app.workers.scheduled_post_worker import (
+    process_publish_job
+)
+
+from app.utils.datetime_parser import (
+    parse_schedule_datetime
 )
 
 router = APIRouter()
 
 
-# ===================================================
-# VERIFY WEBHOOK
-# ===================================================
-
 @router.get("/webhook")
-async def verify_webhook(request: Request):
+async def verify_webhook(
+    request: Request
+):
 
     mode = request.query_params.get(
         "hub.mode"
@@ -50,41 +53,21 @@ async def verify_webhook(request: Request):
         "hub.challenge"
     )
 
-    print("MODE:", mode)
-    print("TOKEN:", token)
+    if mode == "subscribe":
+        return int(challenge)
 
-    print(
-        "ENV TOKEN:",
-        settings.WHATSAPP_VERIFY_TOKEN
-    )
+    return {
+        "error": "Verification failed"
+    }
 
-    if (
-        mode == "subscribe"
-        and token ==
-        settings.WHATSAPP_VERIFY_TOKEN
-    ):
-
-        return PlainTextResponse(
-            content=challenge
-        )
-
-    return PlainTextResponse(
-        content="Verification failed",
-        status_code=403
-    )
-
-
-# ===================================================
-# RECEIVE WHATSAPP MESSAGE
-# ===================================================
 
 @router.post("/webhook")
-async def receive_message(payload: dict):
+async def receive_message(
+    payload: dict,
+    db: Session = Depends(get_db)
+):
 
     try:
-
-        print("FULL WEBHOOK PAYLOAD:")
-        print(payload)
 
         value = (
             payload["entry"][0]
@@ -92,345 +75,468 @@ async def receive_message(payload: dict):
             ["value"]
         )
 
-        print("VALUE:")
-        print(value)
-
-        # ---------------------------------------------------
-        # IGNORE STATUS EVENTS
-        # ---------------------------------------------------
-
         if "messages" not in value:
 
-            print("NO MESSAGES FOUND")
-
             return {
-                "success": True,
-                "message": "No messages"
+                "success": True
             }
 
-        message = value["messages"][0]
-
-        print("FULL MESSAGE:")
-        print(message)
+        message = value[
+            "messages"
+        ][0]
 
         message_type = message.get(
             "type"
         )
 
-        print("MESSAGE TYPE:")
-        print(message_type)
+        phone_number = message[
+            "from"
+        ]
 
-        phone_number = message["from"]
-
-        print("PHONE NUMBER:")
-        print(phone_number)
-
-        # ===================================================
-        # INTERACTIVE BUTTON FLOW
-        # ===================================================
+        # ==================================================
+        # INTERACTIVE FLOW
+        # ==================================================
 
         if message_type == "interactive":
 
-            print("INTERACTIVE BUTTON FLOW")
-
-            button_reply = (
-                message["interactive"]
-                ["button_reply"]
-                ["id"]
+            interactive = message.get(
+                "interactive",
+                {}
             )
 
-            print("BUTTON CLICKED:")
-            print(button_reply)
+            button_reply = None
 
-            pending_post = (
-                await publish_service
-                .get_pending_post(
-                    phone_number
-                )
-            )
+            # ----------------------------------------------
+            # BUTTON REPLY
+            # ----------------------------------------------
 
-            print("PENDING POST:")
-            print(pending_post)
+            if "button_reply" in interactive:
 
-            if not pending_post:
-
-                await send_message(
-                    phone_number,
-                    "No pending post found."
+                button_reply = (
+                    interactive
+                    ["button_reply"]
+                    ["id"]
                 )
 
-                return {"success": False}
+            # ----------------------------------------------
+            # LIST REPLY
+            # ----------------------------------------------
 
-            social_accounts = (
-                await publish_service
-                .get_social_accounts(
-                    phone_number
-                )
-            )
+            elif "list_reply" in interactive:
 
-            print("SOCIAL ACCOUNTS:")
-            print(social_accounts)
-
-            # ---------------------------------------------
-            # INSTAGRAM
-            # ---------------------------------------------
-
-            if button_reply == "instagram":
-
-                print("POSTING TO INSTAGRAM")
-
-                instagram_account = next(
-                    (
-                        account
-                        for account
-                        in social_accounts
-                        if account["platform"]
-                        == "instagram"
-                    ),
-                    None
+                button_reply = (
+                    interactive
+                    ["list_reply"]
+                    ["id"]
                 )
 
-                print("INSTAGRAM ACCOUNT:")
-                print(instagram_account)
+            # ----------------------------------------------
+            # INVALID
+            # ----------------------------------------------
 
-                if not instagram_account:
+            if not button_reply:
 
-                    await send_message(
-                        phone_number,
-                        "Instagram account not connected."
+                print("NO BUTTON REPLY FOUND")
+
+                return {
+                    "success": False
+                }
+
+            # ----------------------------------------------
+            # PLATFORM SELECTION
+            # ----------------------------------------------
+
+            if (
+                button_reply
+                .startswith("platform_")
+            ):
+
+                selected = (
+                    button_reply
+                    .replace(
+                        "platform_",
+                        ""
                     )
+                )
 
-                    return {"success": False}
+                platforms = []
 
-                result = await post_to_instagram(
+                if selected == "all":
 
-                    pending_post["image_url"],
+                    platforms = [
+                        "instagram",
+                        "linkedin",
+                        "twitter",
+                        "facebook"
+                    ]
 
-                    pending_post["caption"],
+                else:
 
-                    instagram_account[
-                        "access_token"
-                    ],
+                    platforms = [selected]
 
-                    instagram_account[
-                        "platform_user_id"
+                session_service.save_selected_platforms(
+                    phone_number,
+                    platforms
+                )
+
+                await send_buttons(
+                    phone_number,
+                    "Choose action",
+                    [
+                        {
+                            "id":
+                            "action_post_now",
+
+                            "title":
+                            "Post Now"
+                        },
+                        {
+                            "id":
+                            "action_schedule",
+
+                            "title":
+                            "Schedule"
+                        }
                     ]
                 )
 
-                print("INSTAGRAM RESULT:")
-                print(result)
+                return {
+                    "success": True
+                }
 
-                await send_message(
-                    phone_number,
-                    "✅ Posted on Instagram"
+            # ----------------------------------------------
+            # POST NOW
+            # ----------------------------------------------
+
+            if button_reply == "action_post_now":
+
+                pending_post = (
+                    session_service
+                    .get_pending_post(
+                        phone_number
+                    )
                 )
 
-                return {"success": True}
-
-            # ---------------------------------------------
-            # LINKEDIN
-            # ---------------------------------------------
-
-            if button_reply == "linkedin":
-
-                print("POSTING TO LINKEDIN")
-
-                linkedin_account = next(
-                    (
-                        account
-                        for account
-                        in social_accounts
-                        if account["platform"]
-                        == "linkedin"
-                    ),
-                    None
+                platforms = (
+                    session_service
+                    .get_selected_platforms(
+                        phone_number
+                    )
                 )
 
-                print("LINKEDIN ACCOUNT:")
-                print(linkedin_account)
+                missing = (
+                    post_service
+                    .get_missing_platforms(
+                        db,
+                        phone_number,
+                        platforms
+                    )
+                )
 
-                if not linkedin_account:
+                if missing:
+
+                    msg = (
+                        "Connect accounts first:\n\n"
+                    )
+
+                    for platform in missing:
+
+                        if platform == "instagram":
+
+                            msg += (
+                                f"Instagram:\n"
+                                f"https://aware-ambition-obvious.ngrok-free.dev/oauth/meta/connect?whatsapp_number={phone_number}\n\n"
+                            )
+
+                        elif platform == "linkedin":
+
+                            msg += (
+                                f"LinkedIn:\n"
+                                f"https://aware-ambition-obvious.ngrok-free.dev/oauth/linkedin/connect?whatsapp_number={phone_number}\n\n"
+                            )
+
+                        elif platform == "twitter":
+
+                            msg += (
+                                "Twitter Coming Soon\n\n"
+                            )
+
+                        elif platform == "facebook":
+
+                            msg += (
+                                "Facebook Coming Soon\n\n"
+                            )
 
                     await send_message(
                         phone_number,
-                        "LinkedIn account not connected."
+                        msg
                     )
 
-                    return {"success": False}
+                    return {
+                        "success": False
+                    }
 
-                result = await post_to_linkedin(
-
-                    pending_post["caption"],
-
-                    pending_post["image_url"],
-
-                    linkedin_account[
-                        "access_token"
-                    ],
-
-                    linkedin_account[
-                        "platform_user_id"
-                    ]
+                jobs = (
+                    post_service
+                    .create_immediate_publish_jobs(
+                        db=db,
+                        whatsapp_number=phone_number,
+                        post_id=pending_post["post_id"],
+                        platforms=platforms
+                    )
                 )
 
-                print("LINKEDIN RESULT:")
-                print(result)
+                for job in jobs:
+
+                    process_publish_job.delay(
+                        job.id
+                    )
 
                 await send_message(
                     phone_number,
-                    "✅ Posted on LinkedIn"
+                    "✅ Publishing started"
                 )
 
-                return {"success": True}
+                session_service.delete_pending_post(
+                    phone_number
+                )
 
-            # ---------------------------------------------
-            # BOTH
-            # ---------------------------------------------
+                session_service.delete_selected_platforms(
+                    phone_number
+                )
 
-            if button_reply == "both":
+                return {
+                    "success": True
+                }
 
-                print("POSTING TO BOTH")
+            # ----------------------------------------------
+            # SCHEDULE
+            # ----------------------------------------------
 
-                for account in social_accounts:
+            if button_reply == "action_schedule":
 
-                    print("ACCOUNT:")
-                    print(account)
-
-                    # -------------------------------------
-                    # INSTAGRAM
-                    # -------------------------------------
-
-                    if (
-                        account["platform"]
-                        == "instagram"
-                    ):
-
-                        await post_to_instagram(
-
-                            pending_post["image_url"],
-
-                            pending_post["caption"],
-
-                            account["access_token"],
-
-                            account[
-                                "platform_user_id"
-                            ]
-                        )
-
-                    # -------------------------------------
-                    # LINKEDIN
-                    # -------------------------------------
-
-                    if (
-                        account["platform"]
-                        == "linkedin"
-                    ):
-
-                        await post_to_linkedin(
-
-                            pending_post["caption"],
-
-                            pending_post["image_url"],
-
-                            account["access_token"],
-
-                            account[
-                                "platform_user_id"
-                            ]
-                        )
+                session_service.enable_schedule_mode(
+                    phone_number
+                )
 
                 await send_message(
                     phone_number,
-                    "✅ Posted on all platforms"
+                    (
+                        "Send schedule time.\n\n"
+                        "Example:\n"
+                        "Tomorrow 9 PM"
+                    )
                 )
 
-                return {"success": True}
+                return {
+                    "success": True
+                }
 
-        # ===================================================
-        # NORMAL TEXT FLOW
-        # ===================================================
+        # ==================================================
+        # TEXT MESSAGE
+        # ==================================================
 
         if message_type == "text":
 
-            print("TEXT MESSAGE FLOW")
-
             text = (
-                message["text"]["body"]
+                message["text"]
+                ["body"]
             )
 
-            print("TEXT:")
-            print(text)
+            # ----------------------------------------------
+            # SCHEDULE TIME
+            # ----------------------------------------------
 
-            # ---------------------------------------------
-            # CREATE AI POST
-            # ---------------------------------------------
-
-            result = await create_post(
-                text
-            )
-
-            print("AI RESULT:")
-            print(result)
-
-            # ---------------------------------------------
-            # LOAD CONNECTED SOCIAL ACCOUNTS
-            # ---------------------------------------------
-
-            social_accounts = (
-                await publish_service
-                .get_social_accounts(
+            if (
+                session_service
+                .is_schedule_mode(
                     phone_number
+                )
+            ):
+
+                scheduled_time = (
+                    parse_schedule_datetime(
+                        text
+                    )
+                )
+
+                if not scheduled_time:
+
+                    await send_message(
+                        phone_number,
+                        "Could not understand time."
+                    )
+
+                    return {
+                        "success": False
+                    }
+
+                pending_post = (
+                    session_service
+                    .get_pending_post(
+                        phone_number
+                    )
+                )
+
+                platforms = (
+                    session_service
+                    .get_selected_platforms(
+                        phone_number
+                    )
+                )
+
+                jobs = (
+                    post_service
+                    .create_scheduled_publish_jobs(
+                        db=db,
+                        whatsapp_number=phone_number,
+                        post_id=pending_post["post_id"],
+                        platforms=platforms,
+                        scheduled_time=scheduled_time
+                    )
+                )
+
+                session_service.disable_schedule_mode(
+                    phone_number
+                )
+
+                session_service.delete_pending_post(
+                    phone_number
+                )
+
+                session_service.delete_selected_platforms(
+                    phone_number
+                )
+
+                await send_message(
+                    phone_number,
+                    (
+                        f"✅ Scheduled successfully for:\n"
+                        f"{scheduled_time}"
+                    )
+                )
+
+                return {
+                    "success": True
+                }
+
+            # ----------------------------------------------
+            # GENERATE AI POST
+            # ----------------------------------------------
+
+            ai_post = await (
+                post_service
+                .create_ai_post(
+                    db,
+                    phone_number,
+                    text
                 )
             )
 
-            print("FOUND SOCIAL ACCOUNTS:")
-            print(social_accounts)
+            session_service.save_pending_post(
+                phone_number,
+                ai_post
+            )
 
-            # ---------------------------------------------
-            # SAVE PENDING POST
-            # ---------------------------------------------
+            await send_image(
+                phone_number,
+                ai_post["image_url"],
+                ai_post["caption"]
+            )
 
-            await publish_service.create_pending_post(
+            await send_list_message(
 
                 phone_number,
 
-                result["caption"],
+                "Choose platforms",
 
-                result["image_url"],
+                "Platforms",
 
-                social_accounts
+                [
+                    {
+                        "title":
+                        "Social Platforms",
+
+                        "rows": [
+
+                            {
+                                "id":
+                                "platform_instagram",
+
+                                "title":
+                                "Instagram"
+                            },
+
+                            {
+                                "id":
+                                "platform_linkedin",
+
+                                "title":
+                                "LinkedIn"
+                            },
+
+                            {
+                                "id":
+                                "platform_twitter",
+
+                                "title":
+                                "Twitter"
+                            },
+
+                            {
+                                "id":
+                                "platform_facebook",
+
+                                "title":
+                                "Facebook"
+                            },
+
+                            {
+                                "id":
+                                "platform_all",
+
+                                "title":
+                                "All Platforms"
+                            }
+                        ]
+                    }
+                ]
             )
 
-            print("PENDING POST SAVED")
-
-            # ---------------------------------------------
-            # SEND BUTTONS
-            # ---------------------------------------------
-
-            await send_platform_buttons(
-
-                phone_number,
-
-                result["caption"]
-            )
-
-            print("BUTTONS SENT")
-
-            return {"success": True}
+            return {
+                "success": True
+            }
 
         return {
-            "success": False,
-            "message":
-            "Unsupported message type"
+            "success": True
         }
-
+        
+        
     except Exception as e:
+        
 
         print("WEBHOOK ERROR:")
+
         print(str(e))
+
+        traceback.print_exc()
 
         return {
             "success": False,
             "error": str(e)
         }
+        
+        
+    
+            
+        
+        
+
+    # except Exception as e:
+
+    #     print("WEBHOOK ERROR:")
+    #     print(str(e))
+
+    #     return {
+    #         "success": False
+    #     }

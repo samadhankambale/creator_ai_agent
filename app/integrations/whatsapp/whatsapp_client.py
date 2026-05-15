@@ -1,146 +1,311 @@
-import httpx
+import requests
 
 from app.core.config import settings
 
 
-# ---------------------------------------------------
-# SEND NORMAL TEXT MESSAGE
-# ---------------------------------------------------
+WHATSAPP_URL = (
+
+    "https://graph.facebook.com"
+
+    f"/v20.0/"
+
+    f"{settings.WHATSAPP_PHONE_NUMBER_ID}"
+
+    "/messages"
+)
+
+
+HEADERS = {
+
+    "Authorization":
+    f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
+
+    "Content-Type":
+    "application/json"
+}
+
+
+# ======================================================
+# SEND TEXT MESSAGE
+# ======================================================
 
 async def send_message(
-    phone_number: str,
-    text: str
+    to: str,
+    message: str
 ):
 
-    url = (
-        "https://graph.facebook.com/v20.0/"
-        f"{settings.WHATSAPP_PHONE_NUMBER_ID}"
-        "/messages"
-    )
-
-    headers = {
-        "Authorization":
-        f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
-
-        "Content-Type":
-        "application/json"
-    }
-
     payload = {
-        "messaging_product": "whatsapp",
 
-        "to": phone_number,
+        "messaging_product":
+        "whatsapp",
 
-        "type": "text",
+        "to":
+        to,
+
+        "type":
+        "text",
 
         "text": {
-            "body": text
+
+            "body":
+            message[:4096]
         }
     }
 
-    async with httpx.AsyncClient() as client:
+    response = requests.post(
 
-        response = await client.post(
-            url,
-            headers=headers,
-            json=payload
-        )
+        WHATSAPP_URL,
 
-        print("SEND MESSAGE RESPONSE:")
-        print(response.json())
+        headers=HEADERS,
+
+        json=payload
+    )
+
+    print("SEND MESSAGE RESPONSE:")
+
+    print(response.json())
+
+    return response.json()
 
 
-# ---------------------------------------------------
-# SEND PLATFORM BUTTONS
-# ---------------------------------------------------
+# ======================================================
+# SEND IMAGE
+# ======================================================
 
-async def send_platform_buttons(
-    phone_number: str,
-    caption: str
+async def send_image(
+    to: str,
+    image_url: str,
+    caption: str = ""
 ):
 
-    url = (
-        "https://graph.facebook.com/v20.0/"
-        f"{settings.WHATSAPP_PHONE_NUMBER_ID}"
-        "/messages"
-    )
+    # ----------------------------------------------
+    # WHATSAPP CAPTION LIMIT
+    # ----------------------------------------------
 
-    headers = {
-        "Authorization":
-        f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
-
-        "Content-Type":
-        "application/json"
-    }
-
-    # ---------------------------------------------
-    # SHORTEN CAPTION
-    # ---------------------------------------------
-
-    short_caption = caption[:300]
-
-    body_text = (
-        f"📌 {short_caption}\n\n"
-        "Where do you want to post?"
-    )
+    caption = caption[:1024]
 
     payload = {
-        "messaging_product": "whatsapp",
 
-        "to": phone_number,
+        "messaging_product":
+        "whatsapp",
 
-        "type": "interactive",
+        "to":
+        to,
+
+        "type":
+        "image",
+
+        "image": {
+
+            "link":
+            image_url,
+
+            "caption":
+            caption
+        }
+    }
+
+    response = requests.post(
+
+        WHATSAPP_URL,
+
+        headers=HEADERS,
+
+        json=payload
+    )
+
+    print("SEND IMAGE RESPONSE:")
+
+    print(response.json())
+
+    return response.json()
+
+
+# ======================================================
+# SEND BUTTONS
+# ======================================================
+
+async def send_buttons(
+    to: str,
+    body_text: str,
+    buttons: list
+):
+
+    # ----------------------------------------------
+    # WHATSAPP LIMIT
+    # ----------------------------------------------
+
+    body_text = body_text[:1024]
+
+    formatted_buttons = []
+
+    for button in buttons:
+
+        formatted_buttons.append({
+
+            "type": "reply",
+
+            "reply": {
+
+                "id":
+                button["id"],
+
+                "title":
+                button["title"][:20]
+            }
+        })
+
+    payload = {
+
+        "messaging_product":
+        "whatsapp",
+
+        "to":
+        to,
+
+        "type":
+        "interactive",
 
         "interactive": {
 
-            "type": "button",
+            "type":
+            "button",
 
             "body": {
-                "text": body_text
+
+                "text":
+                body_text
             },
 
             "action": {
 
-                "buttons": [
-
-                    {
-                        "type": "reply",
-
-                        "reply": {
-                            "id": "instagram",
-                            "title": "Instagram"
-                        }
-                    },
-
-                    {
-                        "type": "reply",
-
-                        "reply": {
-                            "id": "linkedin",
-                            "title": "LinkedIn"
-                        }
-                    },
-
-                    {
-                        "type": "reply",
-
-                        "reply": {
-                            "id": "both",
-                            "title": "Both"
-                        }
-                    }
-                ]
+                "buttons":
+                formatted_buttons
             }
         }
     }
 
-    async with httpx.AsyncClient() as client:
+    response = requests.post(
 
-        response = await client.post(
-            url,
-            headers=headers,
-            json=payload
-        )
+        WHATSAPP_URL,
 
-        print("BUTTON RESPONSE:")
-        print(response.json())
+        headers=HEADERS,
+
+        json=payload
+    )
+
+    print("BUTTON RESPONSE:")
+
+    print(response.json())
+
+    return response.json()
+
+
+# ======================================================
+# SEND LIST MESSAGE
+# ======================================================
+
+async def send_list_message(
+    to: str,
+    body_text: str,
+    button_text: str,
+    sections: list
+):
+
+    payload = {
+
+        "messaging_product":
+        "whatsapp",
+
+        "to":
+        to,
+
+        "type":
+        "interactive",
+
+        "interactive": {
+
+            "type":
+            "list",
+
+            "body": {
+
+                "text":
+                body_text[:1024]
+            },
+
+            "action": {
+
+                "button":
+                button_text[:20],
+
+                "sections":
+                sections
+            }
+        }
+    }
+
+    response = requests.post(
+
+        WHATSAPP_URL,
+
+        headers=HEADERS,
+
+        json=payload
+    )
+
+    print("LIST RESPONSE:")
+
+    print(response.json())
+
+    return response.json()
+
+
+# ======================================================
+# SEND TEMPLATE
+# ======================================================
+
+async def send_template_message(
+    to: str,
+    template_name: str,
+    language_code: str = "en_US"
+):
+
+    payload = {
+
+        "messaging_product":
+        "whatsapp",
+
+        "to":
+        to,
+
+        "type":
+        "template",
+
+        "template": {
+
+            "name":
+            template_name,
+
+            "language": {
+
+                "code":
+                language_code
+            }
+        }
+    }
+
+    response = requests.post(
+
+        WHATSAPP_URL,
+
+        headers=HEADERS,
+
+        json=payload
+    )
+
+    print("TEMPLATE RESPONSE:")
+
+    print(response.json())
+
+    return response.json()

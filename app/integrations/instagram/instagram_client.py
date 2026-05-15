@@ -1,92 +1,132 @@
-import httpx
+import time
+import requests
 
 
-async def post_to_instagram(
+# ======================================================
+# CREATE MEDIA CONTAINER
+# ======================================================
+
+def create_media_container(
     image_url,
     caption,
     access_token,
     instagram_user_id
 ):
 
-    # ==================================================
-    # INSTAGRAM CAPTION LIMIT
-    # ==================================================
+    try:
 
-    short_caption = caption[:2000]
+        print("===================================")
+        print("CREATE MEDIA CONTAINER")
+        print("===================================")
 
-    print("SHORT CAPTION:")
-    print(short_caption)
+        print("IMAGE URL:")
+        print(image_url)
 
-    print("IMAGE URL:")
-    print(image_url)
+        print("INSTAGRAM USER ID:")
+        print(instagram_user_id)
 
-    print("INSTAGRAM USER ID:")
-    print(instagram_user_id)
+        print("ACCESS TOKEN:")
+        print(access_token)
 
-    async with httpx.AsyncClient(
-        timeout=60.0
-    ) as client:
-
-        # ==============================================
-        # CREATE MEDIA CONTAINER
-        # ==============================================
-
-        create_url = (
-            "https://graph.facebook.com/v20.0/"
+        url = (
+            f"https://graph.facebook.com/v20.0/"
             f"{instagram_user_id}/media"
         )
 
-        create_payload = {
+        payload = {
 
             "image_url":
             image_url,
 
             "caption":
-            short_caption,
+            caption[:2200],
 
             "access_token":
             access_token
         }
 
-        print("CREATE PAYLOAD:")
-        print(create_payload)
+        response = requests.post(
 
-        response = await client.post(
+            url,
 
-            create_url,
-
-            data=create_payload
+            data=payload
         )
+
+        print("STATUS CODE:")
+        print(response.status_code)
 
         data = response.json()
 
-        print("CREATE RESPONSE:")
+        print("INSTAGRAM CREATE RESPONSE:")
         print(data)
 
-        # ==============================================
-        # HANDLE CREATE ERROR
-        # ==============================================
+        # ------------------------------------------
+        # SUCCESS
+        # ------------------------------------------
 
-        if "id" not in data:
+        if "id" in data:
 
-            raise Exception(data)
+            return {
 
-        creation_id = data["id"]
+                "success": True,
+
+                "creation_id":
+                data["id"],
+
+                "response":
+                data
+            }
+
+        # ------------------------------------------
+        # FAILURE
+        # ------------------------------------------
+
+        return {
+
+            "success": False,
+
+            "response":
+            data
+        }
+
+    except Exception as e:
+
+        print("CREATE MEDIA ERROR:")
+        print(str(e))
+
+        return {
+
+            "success": False,
+
+            "error": str(e)
+        }
+
+
+# ======================================================
+# PUBLISH MEDIA
+# ======================================================
+
+def publish_media(
+    creation_id,
+    access_token,
+    instagram_user_id
+):
+
+    try:
+
+        print("===================================")
+        print("PUBLISH MEDIA")
+        print("===================================")
 
         print("CREATION ID:")
         print(creation_id)
 
-        # ==============================================
-        # PUBLISH POST
-        # ==============================================
-
-        publish_url = (
-            "https://graph.facebook.com/v20.0/"
-            f"{instagram_user_id}"
-            "/media_publish"
+        url = (
+            f"https://graph.facebook.com/v20.0/"
+            f"{instagram_user_id}/media_publish"
         )
 
-        publish_payload = {
+        payload = {
 
             "creation_id":
             creation_id,
@@ -95,21 +135,168 @@ async def post_to_instagram(
             access_token
         }
 
-        print("PUBLISH PAYLOAD:")
-        print(publish_payload)
+        response = requests.post(
 
-        publish_response = await client.post(
+            url,
 
-            publish_url,
-
-            data=publish_payload
+            data=payload
         )
 
-        publish_data = (
-            publish_response.json()
-        )
+        print("PUBLISH STATUS:")
+        print(response.status_code)
+
+        data = response.json()
 
         print("PUBLISH RESPONSE:")
-        print(publish_data)
+        print(data)
 
-        return publish_data
+        # ------------------------------------------
+        # SUCCESS
+        # ------------------------------------------
+
+        if "id" in data:
+
+            return {
+
+                "success": True,
+
+                "response":
+                data
+            }
+
+        # ------------------------------------------
+        # FAILURE
+        # ------------------------------------------
+
+        return {
+
+            "success": False,
+
+            "response":
+            data
+        }
+
+    except Exception as e:
+
+        print("PUBLISH ERROR:")
+        print(str(e))
+
+        return {
+
+            "success": False,
+
+            "error": str(e)
+        }
+
+
+# ======================================================
+# MAIN INSTAGRAM POST
+# ======================================================
+
+def post_to_instagram(
+    image_url,
+    caption,
+    access_token,
+    instagram_user_id
+):
+
+    try:
+
+        print("===================================")
+        print("START INSTAGRAM POST")
+        print("===================================")
+
+        # ------------------------------------------
+        # CREATE CONTAINER
+        # ------------------------------------------
+
+        container = create_media_container(
+
+            image_url=image_url,
+
+            caption=caption,
+
+            access_token=access_token,
+
+            instagram_user_id=
+            instagram_user_id
+        )
+
+        print("CONTAINER RESULT:")
+        print(container)
+
+        if not container["success"]:
+
+            return {
+
+                "success": False,
+
+                "response":
+                container
+            }
+
+        creation_id = (
+            container["creation_id"]
+        )
+
+        # ------------------------------------------
+        # WAIT FOR META PROCESSING
+        # ------------------------------------------
+
+        print("WAITING FOR META PROCESSING")
+
+        time.sleep(5)
+
+        # ------------------------------------------
+        # PUBLISH MEDIA
+        # ------------------------------------------
+
+        publish_result = publish_media(
+
+            creation_id=creation_id,
+
+            access_token=access_token,
+
+            instagram_user_id=
+            instagram_user_id
+        )
+
+        print("FINAL PUBLISH RESULT:")
+        print(publish_result)
+
+        if not publish_result["success"]:
+
+            return {
+
+                "success": False,
+
+                "response":
+                publish_result
+            }
+
+        print("===================================")
+        print("INSTAGRAM POST SUCCESS")
+        print("===================================")
+
+        return {
+
+            "success": True,
+
+            "platform":
+            "instagram",
+
+            "response":
+            publish_result
+        }
+
+    except Exception as e:
+
+        print("INSTAGRAM POST ERROR:")
+        print(str(e))
+
+        return {
+
+            "success": False,
+
+            "error": str(e)
+        }

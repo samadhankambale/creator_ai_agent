@@ -3,19 +3,24 @@ from celery import Celery
 from app.core.config import settings
 
 
+from celery import Celery
+
+from app.core.config import settings
+
+
 celery_app = Celery(
 
-    "creator_ai_agent",
+    "creator_agent",
 
     broker=settings.REDIS_URL,
 
-    backend=settings.REDIS_URL
+    backend=settings.REDIS_URL,
+
+    include=[
+        "app.workers.scheduled_post_worker"
+    ]
 )
 
-
-# ======================================================
-# CELERY CONFIG
-# ======================================================
 
 celery_app.conf.update(
 
@@ -27,24 +32,5 @@ celery_app.conf.update(
 
     timezone="Asia/Kolkata",
 
-    enable_utc=False,
-
-    task_track_started=True,
-
-    task_time_limit=300,
-
-    worker_prefetch_multiplier=1
-)
-
-
-# ======================================================
-# AUTO DISCOVER TASKS
-# ======================================================
-
-celery_app.autodiscover_tasks(
-
-    [
-
-        "app.workers"
-    ]
+    enable_utc=True
 )

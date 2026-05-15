@@ -52,6 +52,9 @@ class PublishJobRepository:
 
             .all()
         )
+        
+        
+    
 
     def update_job_status(
         self,
@@ -94,3 +97,21 @@ class PublishJobRepository:
 publish_job_repository = (
     PublishJobRepository()
 )
+
+
+def get_job_by_id(
+    self,
+    db,
+    job_id
+):
+
+    return (
+
+        db.query(PublishJob)
+
+        .filter(
+            PublishJob.id == job_id
+        )
+
+        .first()
+    )

@@ -3,51 +3,63 @@ import requests
 from app.core.config import settings
 
 
+# ======================================================
+# EXCHANGE CODE FOR ACCESS TOKEN
+# ======================================================
+
 def exchange_code_for_token(
     code: str
 ):
 
-    # ---------------------------------------------
-    # GET ACCESS TOKEN
-    # ---------------------------------------------
-
-    token_url = (
+    url = (
         "https://graph.facebook.com/v20.0/oauth/access_token"
     )
 
-    token_response = requests.get(
-        token_url,
-        params={
+    params = {
 
-            "client_id":
-            settings.META_APP_ID,
+        "client_id":
+        settings.META_APP_ID,
 
-            "client_secret":
-            settings.META_APP_SECRET,
+        "client_secret":
+        settings.META_APP_SECRET,
 
-            "redirect_uri":
-            settings.META_REDIRECT_URI,
+        "redirect_uri":
+        settings.META_REDIRECT_URI,
 
-            "code":
-            code
-        }
+        "code":
+        code
+    }
+
+    response = requests.get(
+
+        url,
+
+        params=params
     )
 
-    token_data = token_response.json()
+    data = response.json()
 
-    print("TOKEN RESPONSE:")
-    print(token_data)
+    print("META TOKEN RESPONSE:")
+    print(data)
 
-    access_token = token_data.get(
-        "access_token"
+    return data
+
+
+# ======================================================
+# GET FACEBOOK PAGES
+# ======================================================
+
+def get_facebook_pages(
+    access_token: str
+):
+
+    url = (
+        "https://graph.facebook.com/v20.0/me/accounts"
     )
 
-    # ---------------------------------------------
-    # GET FACEBOOK PAGES
-    # ---------------------------------------------
+    response = requests.get(
 
-    pages_response = requests.get(
-        "https://graph.facebook.com/v20.0/me/accounts",
+        url,
 
         params={
             "access_token":
@@ -55,68 +67,46 @@ def exchange_code_for_token(
         }
     )
 
-    pages_data = pages_response.json()
+    data = response.json()
 
-    print("PAGES DATA:")
-    print(pages_data)
+    print("FACEBOOK PAGES:")
+    print(data)
 
-    pages = pages_data.get(
-        "data",
-        []
+    return data
+
+
+# ======================================================
+# GET INSTAGRAM BUSINESS ACCOUNT
+# ======================================================
+
+def get_instagram_business_account(
+    page_id: str,
+    access_token: str
+):
+
+    url = (
+        f"https://graph.facebook.com/v20.0/{page_id}"
     )
 
-    if not pages:
+    params = {
 
-        return {
-            "error":
-            "No Facebook pages found"
-        }
-
-    page_id = pages[0]["id"]
-
-    # ---------------------------------------------
-    # GET INSTAGRAM BUSINESS ACCOUNT
-    # ---------------------------------------------
-
-    instagram_response = requests.get(
-
-        f"https://graph.facebook.com/v20.0/"
-        f"{page_id}",
-
-        params={
-            "fields":
-            "instagram_business_account",
-
-            "access_token":
-            access_token
-        }
-    )
-
-    instagram_data = (
-        instagram_response.json()
-    )
-
-    print("INSTAGRAM DATA:")
-    print(instagram_data)
-
-    instagram_business_account = (
-        instagram_data.get(
-            "instagram_business_account",
-            {}
-        )
-    )
-
-    instagram_user_id = (
-        instagram_business_account.get(
-            "id"
-        )
-    )
-
-    return {
+        "fields":
+        "instagram_business_account",
 
         "access_token":
-        access_token,
-
-        "instagram_user_id":
-        instagram_user_id
+        access_token
     }
+
+    response = requests.get(
+
+        url,
+
+        params=params
+    )
+
+    data = response.json()
+
+    print("INSTAGRAM BUSINESS ACCOUNT:")
+    print(data)
+
+    return data

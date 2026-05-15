@@ -16,15 +16,10 @@ class PostRepository:
     ):
 
         post = Post(
-
             user_id=user_id,
-
             prompt=prompt,
-
             caption=caption,
-
             image_url=image_url,
-
             status=status
         )
 
@@ -43,13 +38,8 @@ class PostRepository:
     ):
 
         return (
-
             db.query(Post)
-
-            .filter(
-                Post.id == post_id
-            )
-
+            .filter(Post.id == post_id)
             .first()
         )
 
@@ -61,18 +51,12 @@ class PostRepository:
     ):
 
         post = (
-
             db.query(Post)
-
-            .filter(
-                Post.id == post_id
-            )
-
+            .filter(Post.id == post_id)
             .first()
         )
 
         if not post:
-
             return None
 
         post.status = status

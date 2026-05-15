@@ -25,63 +25,34 @@ from app.services.publishing_service import (
 )
 
 
-# ======================================================
-# PROCESS PUBLISH JOB
-# ======================================================
-
 @celery_app.task(
     bind=True,
     max_retries=3
 )
+
+@celery_app.task(
+    name="app.workers.scheduled_post_worker.process_publish_job"
+)
 def process_publish_job(
     self,
-    job_id: int
+    job_id
 ):
 
     db = SessionLocal()
 
     try:
 
-        # ------------------------------------------------
-        # GET JOB
-        # ------------------------------------------------
-
-        jobs = (
+        job = (
             publish_job_repository
-            .get_pending_jobs(db)
-        )
-
-        job = next(
-            (
-                j for j in jobs
-                if j.id == job_id
-            ),
-            None
+            .get_job_by_id(
+                db,
+                job_id
+            )
         )
 
         if not job:
 
-            return {
-                "error":
-                "Job not found"
-            }
-
-        # ------------------------------------------------
-        # UPDATE STATUS
-        # ------------------------------------------------
-
-        publish_job_repository.update_job_status(
-
-            db=db,
-
-            job_id=job.id,
-
-            status="processing"
-        )
-
-        # ------------------------------------------------
-        # GET POST
-        # ------------------------------------------------
+            return
 
         post = (
             post_repository
@@ -93,51 +64,7 @@ def process_publish_job(
 
         if not post:
 
-            publish_job_repository.update_job_status(
-
-                db=db,
-
-                job_id=job.id,
-
-                status="failed",
-
-                error_message=
-                "Post not found"
-            )
-
             return
-
-        # ------------------------------------------------
-        # GET USER
-        # ------------------------------------------------
-
-        user = (
-            social_account_service
-            .get_user_by_whatsapp(
-                db,
-                post.user.whatsapp_number
-            )
-        )
-
-        if not user:
-
-            publish_job_repository.update_job_status(
-
-                db=db,
-
-                job_id=job.id,
-
-                status="failed",
-
-                error_message=
-                "User not found"
-            )
-
-            return
-
-        # ------------------------------------------------
-        # GET ACCOUNT
-        # ------------------------------------------------
 
         account = (
             social_account_service
@@ -146,7 +73,7 @@ def process_publish_job(
                 db=db,
 
                 whatsapp_number=
-                user.whatsapp_number,
+                post.user.whatsapp_number,
 
                 platform=
                 job.platform
@@ -164,14 +91,19 @@ def process_publish_job(
                 status="failed",
 
                 error_message=
-                f"{job.platform} account not connected"
+                "Account not connected"
             )
 
             return
 
-        # ------------------------------------------------
-        # PUBLISH
-        # ------------------------------------------------
+        publish_job_repository.update_job_status(
+
+            db=db,
+
+            job_id=job.id,
+
+            status="processing"
+        )
 
         result = (
             publishing_service
@@ -191,42 +123,43 @@ def process_publish_job(
             )
         )
 
-        # ------------------------------------------------
-        # SUCCESS
-        # ------------------------------------------------
+        if result.get("success"):
 
-        publish_job_repository.update_job_status(
+            publish_job_repository.update_job_status(
 
-            db=db,
+                db=db,
 
-            job_id=job.id,
+                job_id=job.id,
 
-            status="success"
-        )
+                status="success"
+            )
 
-        post_repository.update_post_status(
+            post_repository.update_post_status(
 
-            db=db,
+                db=db,
 
-            post_id=post.id,
+                post_id=post.id,
 
-            status="published"
-        )
+                status="published"
+            )
 
-        return result
+        else:
+
+            publish_job_repository.update_job_status(
+
+                db=db,
+
+                job_id=job.id,
+
+                status="failed",
+
+                error_message=
+                str(result)
+            )
 
     except Exception as e:
 
-        publish_job_repository.update_job_status(
-
-            db=db,
-
-            job_id=job_id,
-
-            status="failed",
-
-            error_message=str(e)
-        )
+        print(e)
 
         raise self.retry(
             exc=e,
@@ -238,11 +171,9 @@ def process_publish_job(
         db.close()
 
 
-# ======================================================
-# PROCESS SCHEDULED JOBS
-# ======================================================
-
-@celery_app.task
+@celery_app.task(
+    name="app.workers.scheduled_post_worker.process_scheduled_jobs"
+)
 def process_scheduled_jobs():
 
     db = SessionLocal()
@@ -258,23 +189,10 @@ def process_scheduled_jobs():
 
         for job in jobs:
 
-            # --------------------------------------------
-            # IMMEDIATE JOB
-            # --------------------------------------------
-
-            if not job.scheduled_time:
-
-                process_publish_job.delay(
-                    job.id
-                )
-
-                continue
-
-            # --------------------------------------------
-            # SCHEDULED JOB
-            # --------------------------------------------
-
-            if job.scheduled_time <= now:
+            if (
+                job.scheduled_time
+                and job.scheduled_time <= now
+            ):
 
                 process_publish_job.delay(
                     job.id

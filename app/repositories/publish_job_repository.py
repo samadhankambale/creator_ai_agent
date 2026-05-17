@@ -1,5 +1,3 @@
-from sqlalchemy.orm import Session
-
 from app.models.publish_job import (
     PublishJob
 )
@@ -7,13 +5,17 @@ from app.models.publish_job import (
 
 class PublishJobRepository:
 
+    # ==================================================
+    # CREATE JOB
+    # ==================================================
+
     def create_job(
         self,
-        db: Session,
-        user_id: int,
-        post_id: int,
-        platform: str,
-        scheduled_time = None
+        db,
+        user_id,
+        post_id,
+        platform,
+        scheduled_time=None
     ):
 
         job = PublishJob(
@@ -24,8 +26,9 @@ class PublishJobRepository:
 
             platform=platform,
 
-            scheduled_time=
-            scheduled_time
+            scheduled_time=scheduled_time,
+
+            status="pending"
         )
 
         db.add(job)
@@ -36,9 +39,14 @@ class PublishJobRepository:
 
         return job
 
-    def get_pending_jobs(
+    # ==================================================
+    # GET JOB BY ID
+    # ==================================================
+
+    def get_job_by_id(
         self,
-        db: Session
+        db,
+        job_id
     ):
 
         return (
@@ -46,22 +54,42 @@ class PublishJobRepository:
             db.query(PublishJob)
 
             .filter(
-                PublishJob.status
-                == "pending"
+                PublishJob.id == job_id
+            )
+
+            .first()
+        )
+
+    # ==================================================
+    # GET PENDING JOBS
+    # ==================================================
+
+    def get_pending_jobs(
+        self,
+        db
+    ):
+
+        return (
+
+            db.query(PublishJob)
+
+            .filter(
+                PublishJob.status == "pending"
             )
 
             .all()
         )
-        
-        
-    
+
+    # ==================================================
+    # UPDATE JOB STATUS
+    # ==================================================
 
     def update_job_status(
         self,
-        db: Session,
-        job_id: int,
-        status: str,
-        error_message: str = None
+        db,
+        job_id,
+        status,
+        error_message=None
     ):
 
         job = (
@@ -81,7 +109,17 @@ class PublishJobRepository:
 
         job.status = status
 
-        if error_message:
+        # ----------------------------------------------
+        # OPTIONAL ERROR MESSAGE
+        # ----------------------------------------------
+
+        if (
+            hasattr(
+                job,
+                "error_message"
+            )
+            and error_message
+        ):
 
             job.error_message = (
                 error_message
@@ -93,25 +131,28 @@ class PublishJobRepository:
 
         return job
 
+    # ==================================================
+    # GET USER JOBS
+    # ==================================================
+
+    def get_user_jobs(
+        self,
+        db,
+        user_id
+    ):
+
+        return (
+
+            db.query(PublishJob)
+
+            .filter(
+                PublishJob.user_id == user_id
+            )
+
+            .all()
+        )
+
 
 publish_job_repository = (
     PublishJobRepository()
 )
-
-
-def get_job_by_id(
-    self,
-    db,
-    job_id
-):
-
-    return (
-
-        db.query(PublishJob)
-
-        .filter(
-            PublishJob.id == job_id
-        )
-
-        .first()
-    )

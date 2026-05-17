@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from sqlalchemy.orm import Session
 
 from app.models.social_account import (
@@ -27,64 +29,9 @@ class SocialAccountRepository:
         username: str = None
     ):
 
-        existing_account = (
-
-            db.query(SocialAccount)
-
-            .filter(
-                SocialAccount.user_id
-                == user_id
-            )
-
-            .filter(
-                SocialAccount.platform
-                == platform
-            )
-
-            .first()
+        encrypted_access_token = (
+            encrypt_token(access_token)
         )
-
-        # ----------------------------------------------
-        # UPDATE EXISTING ACCOUNT
-        # ----------------------------------------------
-
-        if existing_account:
-
-            existing_account.access_token = (
-                encrypt_token(
-                    access_token
-                )
-            )
-
-            existing_account.refresh_token = (
-
-                encrypt_token(
-                    refresh_token
-                )
-
-                if refresh_token
-                else None
-            )
-
-            existing_account.platform_user_id = (
-                platform_user_id
-            )
-
-            existing_account.username = (
-                username
-            )
-
-            existing_account.is_active = True
-
-            db.commit()
-
-            db.refresh(existing_account)
-
-            return existing_account
-
-        # ----------------------------------------------
-        # CREATE NEW ACCOUNT
-        # ----------------------------------------------
 
         account = SocialAccount(
 
@@ -93,19 +40,10 @@ class SocialAccountRepository:
             platform=platform,
 
             access_token=
-            encrypt_token(
-                access_token
-            ),
+            encrypted_access_token,
 
-            refresh_token=(
-
-                encrypt_token(
-                    refresh_token
-                )
-
-                if refresh_token
-                else None
-            ),
+            refresh_token=
+            refresh_token,
 
             platform_user_id=
             platform_user_id,
@@ -122,7 +60,7 @@ class SocialAccountRepository:
         return account
 
     # ==================================================
-    # GET SINGLE ACCOUNT
+    # GET USER PLATFORM ACCOUNT
     # ==================================================
 
     def get_user_platform_account(
@@ -144,11 +82,6 @@ class SocialAccountRepository:
             .filter(
                 SocialAccount.platform
                 == platform
-            )
-
-            .filter(
-                SocialAccount.is_active
-                == True
             )
 
             .first()
@@ -173,85 +106,35 @@ class SocialAccountRepository:
                 == user_id
             )
 
-            .filter(
-                SocialAccount.is_active
-                == True
-            )
-
             .all()
         )
 
     # ==================================================
-    # GET DECRYPTED ACCOUNT
+    # SAFE DECRYPT
     # ==================================================
 
     def get_decrypted_account(
         self,
-        db: Session,
-        user_id: int,
-        platform: str
+        account
     ):
 
-        account = (
-
-            self.get_user_platform_account(
-                db,
-                user_id,
-                platform
-            )
+        safe_account = deepcopy(
+            account
         )
 
-        if not account:
+        token = safe_account.access_token
 
-            return None
+        # already decrypted
+        if token.startswith("EAAX"):
 
-        account.access_token = (
-            decrypt_token(
-                account.access_token
-            )
+            return safe_account
+
+        safe_account.access_token = (
+
+            decrypt_token(token)
         )
 
-        if account.refresh_token:
-
-            account.refresh_token = (
-                decrypt_token(
-                    account.refresh_token
-                )
-            )
-
-        return account
-
-    # ==================================================
-    # DISCONNECT ACCOUNT
-    # ==================================================
-
-    def disconnect_account(
-        self,
-        db: Session,
-        user_id: int,
-        platform: str
-    ):
-
-        account = (
-
-            self.get_user_platform_account(
-                db,
-                user_id,
-                platform
-            )
-        )
-
-        if not account:
-
-            return None
-
-        account.is_active = False
-
-        db.commit()
-
-        db.refresh(account)
-
-        return account
+        return safe_account
 
 
 social_account_repository = (

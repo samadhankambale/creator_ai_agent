@@ -1,4 +1,4 @@
-from datetime import datetime
+import traceback
 
 from app.workers.celery_worker import (
     celery_app
@@ -24,23 +24,32 @@ from app.services.publishing_service import (
     publishing_service
 )
 
-
-@celery_app.task(
-    bind=True,
-    max_retries=3
+from app.integrations.whatsapp.whatsapp_client import (
+    send_message_sync
 )
+
 
 @celery_app.task(
     name="app.workers.scheduled_post_worker.process_publish_job"
 )
 def process_publish_job(
-    self,
     job_id
 ):
+
+    print("================================")
+    print("PROCESSING JOB")
+    print("================================")
+
+    print("JOB ID:")
+    print(job_id)
 
     db = SessionLocal()
 
     try:
+
+        # ============================================
+        # GET JOB
+        # ============================================
 
         job = (
             publish_job_repository
@@ -50,9 +59,18 @@ def process_publish_job(
             )
         )
 
+        print("JOB:")
+        print(job)
+
         if not job:
 
+            print("JOB NOT FOUND")
+
             return
+
+        # ============================================
+        # GET POST
+        # ============================================
 
         post = (
             post_repository
@@ -62,9 +80,18 @@ def process_publish_job(
             )
         )
 
+        print("POST:")
+        print(post)
+
         if not post:
 
+            print("POST NOT FOUND")
+
             return
+
+        # ============================================
+        # GET ACCOUNT
+        # ============================================
 
         account = (
             social_account_service
@@ -80,30 +107,34 @@ def process_publish_job(
             )
         )
 
+        print("ACCOUNT:")
+        print(account)
+
         if not account:
 
-            publish_job_repository.update_job_status(
+            print("ACCOUNT NOT FOUND")
 
-                db=db,
+            send_message_sync(
 
-                job_id=job.id,
+                post.user.whatsapp_number,
 
-                status="failed",
-
-                error_message=
-                "Account not connected"
+                (
+                    f"❌ {job.platform.title()} "
+                    f"account not connected"
+                )
             )
 
             return
 
-        publish_job_repository.update_job_status(
+        print("PLATFORM:")
+        print(job.platform)
 
-            db=db,
+        print("ACCOUNT USER ID:")
+        print(account.platform_user_id)
 
-            job_id=job.id,
-
-            status="processing"
-        )
+        # ============================================
+        # START PUBLISHING
+        # ============================================
 
         result = (
             publishing_service
@@ -123,6 +154,13 @@ def process_publish_job(
             )
         )
 
+        print("PUBLISH RESULT:")
+        print(result)
+
+        # ============================================
+        # SUCCESS
+        # ============================================
+
         if result.get("success"):
 
             publish_job_repository.update_job_status(
@@ -134,14 +172,30 @@ def process_publish_job(
                 status="success"
             )
 
-            post_repository.update_post_status(
+            # ----------------------------------------
+            # SEND SUCCESS WHATSAPP MESSAGE
+            # ----------------------------------------
 
-                db=db,
+            success_message = (
 
-                post_id=post.id,
-
-                status="published"
+                f"✅ Successfully published on "
+                f"{job.platform.title()}"
             )
+
+            send_message_sync(
+
+                post.user.whatsapp_number,
+
+                success_message
+            )
+
+            print(
+                "POST SUCCESSFULLY PUBLISHED"
+            )
+
+        # ============================================
+        # FAILED
+        # ============================================
 
         else:
 
@@ -157,46 +211,43 @@ def process_publish_job(
                 str(result)
             )
 
+            error_message = (
+
+                f"❌ Failed to publish on "
+                f"{job.platform.title()}"
+            )
+
+            send_message_sync(
+
+                post.user.whatsapp_number,
+
+                error_message
+            )
+
+            print("PUBLISH FAILED")
+
     except Exception as e:
 
-        print(e)
+        print("WORKER ERROR:")
+        print(str(e))
 
-        raise self.retry(
-            exc=e,
-            countdown=60
-        )
+        traceback.print_exc()
 
-    finally:
+        try:
 
-        db.close()
+            send_message_sync(
 
+                post.user.whatsapp_number,
 
-@celery_app.task(
-    name="app.workers.scheduled_post_worker.process_scheduled_jobs"
-)
-def process_scheduled_jobs():
-
-    db = SessionLocal()
-
-    try:
-
-        jobs = (
-            publish_job_repository
-            .get_pending_jobs(db)
-        )
-
-        now = datetime.now()
-
-        for job in jobs:
-
-            if (
-                job.scheduled_time
-                and job.scheduled_time <= now
-            ):
-
-                process_publish_job.delay(
-                    job.id
+                (
+                    "❌ Publishing failed due "
+                    "to server error"
                 )
+            )
+
+        except Exception:
+
+            pass
 
     finally:
 

@@ -1,39 +1,38 @@
-from sqlalchemy.orm import Session
-
-from app.models.user import User
+from app.models.user import (
+    User
+)
 
 
 class UserRepository:
 
-    def get_by_whatsapp_number(
+    def get_user_by_whatsapp(
         self,
-        db: Session,
-        whatsapp_number: str
+        db,
+        whatsapp_number
     ):
 
         return (
+
             db.query(User)
+
             .filter(
                 User.whatsapp_number
                 == whatsapp_number
             )
+
             .first()
         )
 
     def create_user(
         self,
-        db: Session,
-        whatsapp_number: str,
-        full_name: str = None
+        db,
+        whatsapp_number
     ):
 
         user = User(
 
             whatsapp_number=
-            whatsapp_number,
-
-            full_name=
-            full_name
+            whatsapp_number
         )
 
         db.add(user)
@@ -45,4 +44,6 @@ class UserRepository:
         return user
 
 
-user_repository = UserRepository()
+user_repository = (
+    UserRepository()
+)

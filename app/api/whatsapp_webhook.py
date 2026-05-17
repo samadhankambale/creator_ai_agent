@@ -1,9 +1,11 @@
+import traceback
+
 from fastapi import (
     APIRouter,
     Request,
     Depends
 )
-import traceback 
+
 from sqlalchemy.orm import Session
 
 from app.database.dependencies import (
@@ -13,8 +15,7 @@ from app.database.dependencies import (
 from app.integrations.whatsapp.whatsapp_client import (
     send_message,
     send_image,
-    send_buttons,
-    send_list_message
+    send_buttons
 )
 
 from app.services.post_service import (
@@ -33,8 +34,13 @@ from app.utils.datetime_parser import (
     parse_schedule_datetime
 )
 
+
 router = APIRouter()
 
+
+# =====================================================
+# VERIFY WEBHOOK
+# =====================================================
 
 @router.get("/webhook")
 async def verify_webhook(
@@ -45,21 +51,22 @@ async def verify_webhook(
         "hub.mode"
     )
 
-    token = request.query_params.get(
-        "hub.verify_token"
-    )
-
     challenge = request.query_params.get(
         "hub.challenge"
     )
 
     if mode == "subscribe":
+
         return int(challenge)
 
     return {
         "error": "Verification failed"
     }
 
+
+# =====================================================
+# RECEIVE MESSAGE
+# =====================================================
 
 @router.post("/webhook")
 async def receive_message(
@@ -69,6 +76,12 @@ async def receive_message(
 
     try:
 
+        print("================================")
+        print("WEBHOOK HIT")
+        print("================================")
+
+        print(payload)
+
         value = (
             payload["entry"][0]
             ["changes"][0]
@@ -76,6 +89,8 @@ async def receive_message(
         )
 
         if "messages" not in value:
+
+            print("NO MESSAGE FOUND")
 
             return {
                 "success": True
@@ -93,9 +108,15 @@ async def receive_message(
             "from"
         ]
 
-        # ==================================================
-        # INTERACTIVE FLOW
-        # ==================================================
+        print("PHONE NUMBER:")
+        print(phone_number)
+
+        print("MESSAGE TYPE:")
+        print(message_type)
+
+        # =================================================
+        # INTERACTIVE BUTTONS
+        # =================================================
 
         if message_type == "interactive":
 
@@ -106,45 +127,44 @@ async def receive_message(
 
             button_reply = None
 
-            # ----------------------------------------------
+            # ---------------------------------------------
             # BUTTON REPLY
-            # ----------------------------------------------
+            # ---------------------------------------------
 
             if "button_reply" in interactive:
 
                 button_reply = (
+
                     interactive
                     ["button_reply"]
                     ["id"]
                 )
 
-            # ----------------------------------------------
+            # ---------------------------------------------
             # LIST REPLY
-            # ----------------------------------------------
+            # ---------------------------------------------
 
             elif "list_reply" in interactive:
 
                 button_reply = (
+
                     interactive
                     ["list_reply"]
                     ["id"]
                 )
 
-            # ----------------------------------------------
-            # INVALID
-            # ----------------------------------------------
+            print("BUTTON REPLY:")
+            print(button_reply)
 
             if not button_reply:
-
-                print("NO BUTTON REPLY FOUND")
 
                 return {
                     "success": False
                 }
 
-            # ----------------------------------------------
+            # =============================================
             # PLATFORM SELECTION
-            # ----------------------------------------------
+            # =============================================
 
             if (
                 button_reply
@@ -164,9 +184,13 @@ async def receive_message(
                 if selected == "all":
 
                     platforms = [
+
                         "instagram",
+
                         "linkedin",
+
                         "twitter",
+
                         "facebook"
                     ]
 
@@ -174,14 +198,26 @@ async def receive_message(
 
                     platforms = [selected]
 
+                print("SELECTED PLATFORMS:")
+                print(platforms)
+
                 session_service.save_selected_platforms(
+
                     phone_number,
+
                     platforms
                 )
 
+                # -----------------------------------------
+                # SHOW ACTION BUTTONS
+                # -----------------------------------------
+
                 await send_buttons(
+
                     phone_number,
+
                     "Choose action",
+
                     [
                         {
                             "id":
@@ -204,9 +240,9 @@ async def receive_message(
                     "success": True
                 }
 
-            # ----------------------------------------------
+            # =============================================
             # POST NOW
-            # ----------------------------------------------
+            # =============================================
 
             if button_reply == "action_post_now":
 
@@ -217,6 +253,19 @@ async def receive_message(
                     )
                 )
 
+                if not pending_post:
+
+                    await send_message(
+
+                        phone_number,
+
+                        "No pending post found."
+                    )
+
+                    return {
+                        "success": False
+                    }
+
                 platforms = (
                     session_service
                     .get_selected_platforms(
@@ -224,67 +273,145 @@ async def receive_message(
                     )
                 )
 
-                missing = (
-                    post_service
-                    .get_missing_platforms(
-                        db,
-                        phone_number,
-                        platforms
-                    )
-                )
+                print("PENDING POST:")
+                print(pending_post)
 
-                if missing:
+                print("PLATFORMS:")
+                print(platforms)
 
-                    msg = (
-                        "Connect accounts first:\n\n"
-                    )
-
-                    for platform in missing:
-
-                        if platform == "instagram":
-
-                            msg += (
-                                f"Instagram:\n"
-                                f"https://aware-ambition-obvious.ngrok-free.dev/oauth/meta/connect?whatsapp_number={phone_number}\n\n"
-                            )
-
-                        elif platform == "linkedin":
-
-                            msg += (
-                                f"LinkedIn:\n"
-                                f"https://aware-ambition-obvious.ngrok-free.dev/oauth/linkedin/connect?whatsapp_number={phone_number}\n\n"
-                            )
-
-                        elif platform == "twitter":
-
-                            msg += (
-                                "Twitter Coming Soon\n\n"
-                            )
-
-                        elif platform == "facebook":
-
-                            msg += (
-                                "Facebook Coming Soon\n\n"
-                            )
+                if not platforms:
 
                     await send_message(
+
                         phone_number,
-                        msg
+
+                        "Please select platform first."
                     )
 
                     return {
                         "success": False
                     }
 
+                # -----------------------------------------
+                # CHECK MISSING CONNECTIONS
+                # -----------------------------------------
+
+                missing = (
+                    post_service
+                    .get_missing_platforms(
+
+                        db,
+
+                        phone_number,
+
+                        platforms
+                    )
+                )
+
+                print("MISSING:")
+                print(missing)
+
+                if missing:
+
+                    connect_message = (
+                        "Connect your accounts:\n\n"
+                    )
+
+                    for platform in missing:
+
+                        # -----------------------------
+                        # INSTAGRAM
+                        # -----------------------------
+
+                        if platform == "instagram":
+
+                            connect_message += (
+
+                                "Instagram:\n"
+                                
+                                f"https://aware-ambition-obvious.ngrok-free.dev/oauth/meta/connect"
+
+                                # f"https://YOUR_NGROK/oauth/meta/connect"
+
+                                f"?whatsapp_number={phone_number}\n\n"
+                            )
+
+                        # -----------------------------
+                        # LINKEDIN
+                        # -----------------------------
+
+                        elif platform == "linkedin":
+
+                            connect_message += (
+
+                                "LinkedIn:\n"
+                                f"https://aware-ambition-obvious.ngrok-free.dev/oauth/meta/connect"
+
+                                # f"https://YOUR_NGROK/oauth/linkedin/connect"
+
+                                f"?whatsapp_number={phone_number}\n\n"
+                            )
+
+                        # -----------------------------
+                        # TWITTER
+                        # -----------------------------
+
+                        elif platform == "twitter":
+
+                            connect_message += (
+                                "Twitter support coming soon.\n\n"
+                            )
+
+                        # -----------------------------
+                        # FACEBOOK
+                        # -----------------------------
+
+                        elif platform == "facebook":
+
+                            connect_message += (
+                                "Facebook support coming soon.\n\n"
+                            )
+
+                    await send_message(
+
+                        phone_number,
+
+                        connect_message
+                    )
+
+                    return {
+                        "success": False
+                    }
+
+                # -----------------------------------------
+                # CREATE PUBLISH JOBS
+                # -----------------------------------------
+
                 jobs = (
                     post_service
                     .create_immediate_publish_jobs(
+
                         db=db,
-                        whatsapp_number=phone_number,
-                        post_id=pending_post["post_id"],
-                        platforms=platforms
+
+                        whatsapp_number=
+                        phone_number,
+
+                        post_id=
+                        pending_post[
+                            "post_id"
+                        ],
+
+                        platforms=
+                        platforms
                     )
                 )
+
+                print("CREATED JOBS:")
+                print(jobs)
+
+                # -----------------------------------------
+                # START CELERY TASKS
+                # -----------------------------------------
 
                 for job in jobs:
 
@@ -293,9 +420,15 @@ async def receive_message(
                     )
 
                 await send_message(
+
                     phone_number,
+
                     "✅ Publishing started"
                 )
+
+                # -----------------------------------------
+                # CLEAR SESSION
+                # -----------------------------------------
 
                 session_service.delete_pending_post(
                     phone_number
@@ -309,9 +442,9 @@ async def receive_message(
                     "success": True
                 }
 
-            # ----------------------------------------------
-            # SCHEDULE
-            # ----------------------------------------------
+            # =============================================
+            # SCHEDULE FLOW
+            # =============================================
 
             if button_reply == "action_schedule":
 
@@ -320,11 +453,15 @@ async def receive_message(
                 )
 
                 await send_message(
+
                     phone_number,
+
                     (
                         "Send schedule time.\n\n"
-                        "Example:\n"
-                        "Tomorrow 9 PM"
+                        "Examples:\n"
+                        "Tomorrow 9 PM\n"
+                        "After 2 hours\n"
+                        "Monday 8 AM"
                     )
                 )
 
@@ -332,9 +469,9 @@ async def receive_message(
                     "success": True
                 }
 
-        # ==================================================
+        # =================================================
         # TEXT MESSAGE
-        # ==================================================
+        # =================================================
 
         if message_type == "text":
 
@@ -343,9 +480,12 @@ async def receive_message(
                 ["body"]
             )
 
-            # ----------------------------------------------
-            # SCHEDULE TIME
-            # ----------------------------------------------
+            print("TEXT:")
+            print(text)
+
+            # =============================================
+            # SCHEDULE TIME INPUT
+            # =============================================
 
             if (
                 session_service
@@ -360,11 +500,19 @@ async def receive_message(
                     )
                 )
 
+                print("SCHEDULED TIME:")
+                print(scheduled_time)
+
                 if not scheduled_time:
 
                     await send_message(
+
                         phone_number,
-                        "Could not understand time."
+
+                        (
+                            "Could not understand time.\n"
+                            "Try again."
+                        )
                     )
 
                     return {
@@ -388,13 +536,41 @@ async def receive_message(
                 jobs = (
                     post_service
                     .create_scheduled_publish_jobs(
+
                         db=db,
-                        whatsapp_number=phone_number,
-                        post_id=pending_post["post_id"],
-                        platforms=platforms,
-                        scheduled_time=scheduled_time
+
+                        whatsapp_number=
+                        phone_number,
+
+                        post_id=
+                        pending_post[
+                            "post_id"
+                        ],
+
+                        platforms=
+                        platforms,
+
+                        scheduled_time=
+                        scheduled_time
                     )
                 )
+
+                print("SCHEDULED JOBS:")
+                print(jobs)
+
+                await send_message(
+
+                    phone_number,
+
+                    (
+                        f"✅ Post scheduled for:\n"
+                        f"{scheduled_time}"
+                    )
+                )
+
+                # -----------------------------------------
+                # CLEAR SESSION
+                # -----------------------------------------
 
                 session_service.disable_schedule_mode(
                     phone_number
@@ -408,97 +584,88 @@ async def receive_message(
                     phone_number
                 )
 
-                await send_message(
-                    phone_number,
-                    (
-                        f"✅ Scheduled successfully for:\n"
-                        f"{scheduled_time}"
-                    )
-                )
-
                 return {
                     "success": True
                 }
 
-            # ----------------------------------------------
+            # =============================================
             # GENERATE AI POST
-            # ----------------------------------------------
+            # =============================================
 
             ai_post = await (
                 post_service
                 .create_ai_post(
+
                     db,
+
                     phone_number,
+
                     text
                 )
             )
 
+            print("AI POST:")
+            print(ai_post)
+
+            # ---------------------------------------------
+            # SAVE SESSION
+            # ---------------------------------------------
+
             session_service.save_pending_post(
+
                 phone_number,
+
                 ai_post
             )
 
+            # ---------------------------------------------
+            # SEND IMAGE PREVIEW
+            # ---------------------------------------------
+
             await send_image(
+
                 phone_number,
-                ai_post["image_url"],
-                ai_post["caption"]
+
+                ai_post[
+                    "image_url"
+                ],
+
+                ai_post[
+                    "caption"
+                ]
             )
 
-            await send_list_message(
+            # ---------------------------------------------
+            # SHOW PLATFORM BUTTONS
+            # ---------------------------------------------
+
+            await send_buttons(
 
                 phone_number,
 
                 "Choose platforms",
 
-                "Platforms",
-
                 [
                     {
+                        "id":
+                        "platform_instagram",
+
                         "title":
-                        "Social Platforms",
+                        "Instagram"
+                    },
+                    {
+                        "id":
+                        "platform_linkedin",
 
-                        "rows": [
+                        "title":
+                        "LinkedIn"
+                    },
+                    {
+                        "id":
+                        "platform_twitter",
 
-                            {
-                                "id":
-                                "platform_instagram",
-
-                                "title":
-                                "Instagram"
-                            },
-
-                            {
-                                "id":
-                                "platform_linkedin",
-
-                                "title":
-                                "LinkedIn"
-                            },
-
-                            {
-                                "id":
-                                "platform_twitter",
-
-                                "title":
-                                "Twitter"
-                            },
-
-                            {
-                                "id":
-                                "platform_facebook",
-
-                                "title":
-                                "Facebook"
-                            },
-
-                            {
-                                "id":
-                                "platform_all",
-
-                                "title":
-                                "All Platforms"
-                            }
-                        ]
+                        "title":
+                        "Twitter"
                     }
                 ]
             )
@@ -510,13 +677,10 @@ async def receive_message(
         return {
             "success": True
         }
-        
-        
+
     except Exception as e:
-        
 
         print("WEBHOOK ERROR:")
-
         print(str(e))
 
         traceback.print_exc()
@@ -525,18 +689,3 @@ async def receive_message(
             "success": False,
             "error": str(e)
         }
-        
-        
-    
-            
-        
-        
-
-    # except Exception as e:
-
-    #     print("WEBHOOK ERROR:")
-    #     print(str(e))
-
-    #     return {
-    #         "success": False
-    #     }

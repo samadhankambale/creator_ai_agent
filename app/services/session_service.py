@@ -11,10 +11,18 @@ redis_client = redis.Redis.from_url(
 
 
 class SessionService:
+    
+    def __init__(self):
 
-    # ==================================================
+        self.pending_posts = {}
+
+        self.selected_platforms = {}
+
+        self.waiting_for_schedule = {}
+
+    # =================================================
     # PENDING POST
-    # ==================================================
+    # =================================================
 
     def save_pending_post(
         self,
@@ -22,79 +30,36 @@ class SessionService:
         post_data
     ):
 
-        redis_client.set(
-
-            f"pending_post:{phone_number}",
-
-            json.dumps(post_data),
-
-            ex=3600
-        )
+        self.pending_posts[
+            phone_number
+        ] = post_data
 
     def get_pending_post(
         self,
         phone_number
     ):
 
-        data = redis_client.get(
-            f"pending_post:{phone_number}"
+        return self.pending_posts.get(
+            phone_number
         )
-
-        if not data:
-            return None
-
-        return json.loads(data)
 
     def delete_pending_post(
         self,
         phone_number
     ):
 
-        redis_client.delete(
-            f"pending_post:{phone_number}"
-        )
+        if (
+            phone_number
+            in self.pending_posts
+        ):
 
-    # ==================================================
-    # SCHEDULE MODE
-    # ==================================================
+            del self.pending_posts[
+                phone_number
+            ]
 
-    def enable_schedule_mode(
-        self,
-        phone_number
-    ):
-
-        redis_client.set(
-
-            f"schedule_mode:{phone_number}",
-
-            "true",
-
-            ex=3600
-        )
-
-    def disable_schedule_mode(
-        self,
-        phone_number
-    ):
-
-        redis_client.delete(
-            f"schedule_mode:{phone_number}"
-        )
-
-    def is_schedule_mode(
-        self,
-        phone_number
-    ):
-
-        data = redis_client.get(
-            f"schedule_mode:{phone_number}"
-        )
-
-        return data == "true"
-
-    # ==================================================
-    # PLATFORM SELECTION
-    # ==================================================
+    # =================================================
+    # SELECTED PLATFORMS
+    # =================================================
 
     def save_selected_platforms(
         self,
@@ -102,37 +67,77 @@ class SessionService:
         platforms
     ):
 
-        redis_client.set(
-
-            f"platforms:{phone_number}",
-
-            json.dumps(platforms),
-
-            ex=3600
-        )
+        self.selected_platforms[
+            phone_number
+        ] = platforms
 
     def get_selected_platforms(
         self,
         phone_number
     ):
 
-        data = redis_client.get(
-            f"platforms:{phone_number}"
+        return self.selected_platforms.get(
+
+            phone_number,
+
+            []
         )
-
-        if not data:
-            return []
-
-        return json.loads(data)
 
     def delete_selected_platforms(
         self,
         phone_number
     ):
 
-        redis_client.delete(
-            f"platforms:{phone_number}"
+        if (
+            phone_number
+            in self.selected_platforms
+        ):
+
+            del self.selected_platforms[
+                phone_number
+            ]
+
+    # =================================================
+    # SCHEDULE STATE
+    # =================================================
+
+    def set_waiting_for_schedule(
+        self,
+        phone_number,
+        value
+    ):
+
+        self.waiting_for_schedule[
+            phone_number
+        ] = value
+
+    def is_waiting_for_schedule(
+        self,
+        phone_number
+    ):
+
+        return self.waiting_for_schedule.get(
+
+            phone_number,
+
+            False
         )
 
+    def clear_schedule_state(
+        self,
+        phone_number
+    ):
 
-session_service = SessionService()
+        if (
+            phone_number
+            in self.waiting_for_schedule
+        ):
+
+            del self.waiting_for_schedule[
+                phone_number
+            ]
+
+
+session_service = (
+    SessionService()
+)

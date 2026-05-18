@@ -28,6 +28,10 @@ from app.integrations.whatsapp.whatsapp_client import (
     send_message_sync
 )
 
+from app.core.config import (
+    settings
+)
+
 
 @celery_app.task(
     name="app.workers.scheduled_post_worker.process_publish_job"
@@ -89,6 +93,8 @@ def process_publish_job(
 
             return
 
+        print("POST FOUND")
+
         # ============================================
         # GET ACCOUNT
         # ============================================
@@ -107,24 +113,100 @@ def process_publish_job(
             )
         )
 
-        print("ACCOUNT:")
-        print(account)
+        # ============================================
+        # ACCOUNT NOT CONNECTED
+        # ============================================
 
         if not account:
 
-            print("ACCOUNT NOT FOUND")
+            print(
+                "ACCOUNT NOT CONNECTED"
+            )
+
+            # ----------------------------------------
+            # PLATFORM CONNECT ROUTES
+            # ----------------------------------------
+
+            platform_connect_routes = {
+
+                "instagram":
+                "/oauth/meta/connect",
+
+                "facebook":
+                "/oauth/meta/connect",
+
+                "linkedin":
+                "/oauth/linkedin/connect",
+
+                "twitter":
+                "/oauth/twitter/connect"
+            }
+
+            route = (
+                platform_connect_routes.get(
+                    job.platform
+                )
+            )
+
+            # ----------------------------------------
+            # GENERATE URL
+            # ----------------------------------------
+
+            if route:
+
+                connect_url = (
+
+                    f"{settings.APP_BASE_URL}"
+                    f"{route}"
+                    f"?whatsapp_number="
+                    f"{post.user.whatsapp_number}"
+                )
+
+            else:
+
+                connect_url = (
+                    settings.APP_BASE_URL
+                )
+
+            print("CONNECT URL:")
+            print(connect_url)
+
+            # ----------------------------------------
+            # SEND MESSAGE
+            # ----------------------------------------
+
+            message = (
+
+                f"⚠️ Your "
+                f"{job.platform.title()} "
+                f"account is not connected.\n\n"
+
+                f"Connect here:\n"
+                f"{connect_url}"
+            )
 
             send_message_sync(
 
                 post.user.whatsapp_number,
 
-                (
-                    f"❌ {job.platform.title()} "
-                    f"account not connected"
-                )
+                message
+            )
+
+            publish_job_repository.update_job_status(
+
+                db=db,
+
+                job_id=job.id,
+
+                status="failed",
+
+                error_message=
+                "Account not connected"
             )
 
             return
+
+        print("ACCOUNT CONNECTED")
 
         print("PLATFORM:")
         print(job.platform)
@@ -172,15 +254,13 @@ def process_publish_job(
                 status="success"
             )
 
-            # ----------------------------------------
-            # SEND SUCCESS WHATSAPP MESSAGE
-            # ----------------------------------------
-
             success_message = (
 
-                f"✅ Successfully published on "
-                f"{job.platform.title()}"
+                f"✅ Successfully published "
+                f"on {job.platform.title()}"
             )
+
+            print(success_message)
 
             send_message_sync(
 
@@ -194,7 +274,7 @@ def process_publish_job(
             )
 
         # ============================================
-        # FAILED
+        # FAILURE
         # ============================================
 
         else:
@@ -211,27 +291,44 @@ def process_publish_job(
                 str(result)
             )
 
-            error_message = (
+            failure_message = (
 
-                f"❌ Failed to publish on "
-                f"{job.platform.title()}"
+                f"❌ Failed to publish "
+                f"on {job.platform.title()}"
             )
+
+            print(failure_message)
 
             send_message_sync(
 
                 post.user.whatsapp_number,
 
-                error_message
+                failure_message
             )
 
-            print("PUBLISH FAILED")
+            print(
+                "PUBLISH FAILED"
+            )
 
+    # ================================================
+    # EXCEPTION
+    # # ================================================
+    
     except Exception as e:
 
-        print("WORKER ERROR:")
+        print("================================")
+        print("WORKER ERROR")
+        print("================================")
+
         print(str(e))
 
         traceback.print_exc()
+
+        error_message = str(e)
+
+        # --------------------------------------------
+        # SEND REAL ERROR
+        # --------------------------------------------
 
         try:
 
@@ -240,14 +337,46 @@ def process_publish_job(
                 post.user.whatsapp_number,
 
                 (
-                    "❌ Publishing failed due "
-                    "to server error"
+                    "❌ Publishing failed\n\n"
+                    f"Error:\n{error_message}"
                 )
             )
 
-        except Exception:
+        except Exception as inner_error:
 
-            pass
+            print(
+                "WHATSAPP SEND ERROR:"
+            )
+
+            print(str(inner_error))
+    
+
+    # except Exception as e:
+
+    #     print("WORKER ERROR:")
+    #     print(str(e))
+
+    #     traceback.print_exc()
+
+    #     try:
+
+    #         send_message_sync(
+
+    #             post.user.whatsapp_number,
+
+    #             (
+    #                 "❌ Publishing failed "
+    #                 "due to server error"
+    #             )
+    #         )
+
+    #     except Exception:
+
+    #         pass
+
+    # ================================================
+    # CLOSE DB
+    # ================================================
 
     finally:
 

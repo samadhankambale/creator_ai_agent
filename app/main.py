@@ -8,6 +8,9 @@ from app.api.oauth_routes import (
     router as oauth_router
 )
 
+from app.api.linkedin_oauth_routes import (
+    router as linkedin_oauth_router
+)
 
 app = FastAPI()
 
@@ -23,6 +26,11 @@ async def root():
 app.include_router(
     whatsapp_router
 )
+
+app.include_router(
+    linkedin_oauth_router
+)
+
 
 app.include_router(
     oauth_router

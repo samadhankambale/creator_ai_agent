@@ -1,9 +1,10 @@
+import asyncio
 import traceback
 
 from fastapi import (
     APIRouter,
-    Request,
-    Depends
+    Depends,
+    Request
 )
 
 from sqlalchemy.orm import Session
@@ -14,8 +15,8 @@ from app.database.dependencies import (
 
 from app.integrations.whatsapp.whatsapp_client import (
     send_message,
-    send_image,
-    send_buttons
+    send_buttons,
+    send_image
 )
 
 from app.services.post_service import (
@@ -26,16 +27,18 @@ from app.services.session_service import (
     session_service
 )
 
-from app.workers.scheduled_post_worker import (
-    process_publish_job
+from app.services.scheduler_service import (
+    scheduler_service
 )
 
-from app.utils.datetime_parser import (
-    parse_schedule_datetime
+from app.core.config import (
+    settings
 )
 
 
 router = APIRouter()
+
+webhook_lock = asyncio.Lock()
 
 
 # =====================================================
@@ -47,20 +50,24 @@ async def verify_webhook(
     request: Request
 ):
 
-    mode = request.query_params.get(
-        "hub.mode"
-    )
+    params = request.query_params
 
-    challenge = request.query_params.get(
-        "hub.challenge"
-    )
+    mode = params.get("hub.mode")
 
-    if mode == "subscribe":
+    token = params.get("hub.verify_token")
+
+    challenge = params.get("hub.challenge")
+
+    if (
+        mode == "subscribe"
+        and token == "creator_ai_verify_token"
+    ):
 
         return int(challenge)
 
     return {
-        "error": "Verification failed"
+        "error":
+        "Verification failed"
     }
 
 
@@ -74,434 +81,525 @@ async def receive_message(
     db: Session = Depends(get_db)
 ):
 
-    try:
+    async with webhook_lock:
 
-        print("================================")
-        print("WEBHOOK HIT")
-        print("================================")
+        try:
 
-        print(payload)
+            print("================================")
+            print("WEBHOOK HIT")
+            print("================================")
 
-        value = (
-            payload["entry"][0]
-            ["changes"][0]
-            ["value"]
-        )
+            print(payload)
 
-        if "messages" not in value:
+            # =========================================
+            # VALIDATE PAYLOAD
+            # =========================================
 
-            print("NO MESSAGE FOUND")
+            if "entry" not in payload:
 
-            return {
-                "success": True
-            }
+                return {
+                    "success":
+                    False
+                }
 
-        message = value[
-            "messages"
-        ][0]
+            entry = payload["entry"][0]
 
-        message_type = message.get(
-            "type"
-        )
+            changes = entry.get(
+                "changes",
+                []
+            )
 
-        phone_number = message[
-            "from"
-        ]
+            if not changes:
 
-        print("PHONE NUMBER:")
-        print(phone_number)
+                return {
+                    "success":
+                    False
+                }
 
-        print("MESSAGE TYPE:")
-        print(message_type)
-
-        # =================================================
-        # INTERACTIVE BUTTONS
-        # =================================================
-
-        if message_type == "interactive":
-
-            interactive = message.get(
-                "interactive",
+            value = changes[0].get(
+                "value",
                 {}
             )
 
-            button_reply = None
+            # =========================================
+            # IGNORE STATUS EVENTS
+            # =========================================
 
-            # ---------------------------------------------
-            # BUTTON REPLY
-            # ---------------------------------------------
+            if "messages" not in value:
 
-            if "button_reply" in interactive:
-
-                button_reply = (
-
-                    interactive
-                    ["button_reply"]
-                    ["id"]
+                print(
+                    "NO MESSAGE FOUND"
                 )
-
-            # ---------------------------------------------
-            # LIST REPLY
-            # ---------------------------------------------
-
-            elif "list_reply" in interactive:
-
-                button_reply = (
-
-                    interactive
-                    ["list_reply"]
-                    ["id"]
-                )
-
-            print("BUTTON REPLY:")
-            print(button_reply)
-
-            if not button_reply:
 
                 return {
-                    "success": False
+                    "success":
+                    True
                 }
 
-            # =============================================
-            # PLATFORM SELECTION
-            # =============================================
+            message = value["messages"][0]
+
+            contacts = value.get(
+                "contacts",
+                []
+            )
+
+            if not contacts:
+
+                return {
+                    "success":
+                    False
+                }
+
+            phone_number = (
+                contacts[0]
+                .get("wa_id")
+            )
+
+            print("PHONE NUMBER:")
+            print(phone_number)
+
+            # =========================================
+            # INTERACTIVE BUTTONS
+            # =========================================
 
             if (
-                button_reply
-                .startswith("platform_")
+                message.get("type")
+                == "interactive"
             ):
 
-                selected = (
-                    button_reply
-                    .replace(
-                        "platform_",
-                        ""
+                interactive = (
+                    message.get(
+                        "interactive",
+                        {}
                     )
                 )
 
-                platforms = []
-
-                if selected == "all":
-
-                    platforms = [
-
-                        "instagram",
-
-                        "linkedin",
-
-                        "twitter",
-
-                        "facebook"
-                    ]
-
-                else:
-
-                    platforms = [selected]
-
-                print("SELECTED PLATFORMS:")
-                print(platforms)
-
-                session_service.save_selected_platforms(
-
-                    phone_number,
-
-                    platforms
-                )
-
-                # -----------------------------------------
-                # SHOW ACTION BUTTONS
-                # -----------------------------------------
-
-                await send_buttons(
-
-                    phone_number,
-
-                    "Choose action",
-
-                    [
-                        {
-                            "id":
-                            "action_post_now",
-
-                            "title":
-                            "Post Now"
-                        },
-                        {
-                            "id":
-                            "action_schedule",
-
-                            "title":
-                            "Schedule"
-                        }
-                    ]
-                )
-
-                return {
-                    "success": True
-                }
-
-            # =============================================
-            # POST NOW
-            # =============================================
-
-            if button_reply == "action_post_now":
-
-                pending_post = (
-                    session_service
-                    .get_pending_post(
-                        phone_number
+                button_reply = (
+                    interactive.get(
+                        "button_reply",
+                        {}
                     )
                 )
 
-                if not pending_post:
+                button_id = (
+                    button_reply.get(
+                        "id"
+                    )
+                )
 
-                    await send_message(
+                print("BUTTON CLICK:")
+                print(button_id)
+
+                # =====================================
+                # PLATFORM SELECT
+                # =====================================
+
+                if (
+                    button_id.startswith(
+                        "platform_"
+                    )
+                ):
+
+                    platform = (
+                        button_id.replace(
+                            "platform_",
+                            ""
+                        )
+                    )
+
+                    print("PLATFORM:")
+                    print(platform)
+
+                    selected_platforms = (
+                        session_service
+                        .get_selected_platforms(
+                            phone_number
+                        )
+                    )
+
+                    if (
+                        platform
+                        not in selected_platforms
+                    ):
+
+                        selected_platforms.append(
+                            platform
+                        )
+
+                    session_service.save_selected_platforms(
 
                         phone_number,
 
-                        "No pending post found."
+                        selected_platforms
                     )
 
-                    return {
-                        "success": False
-                    }
-
-                platforms = (
-                    session_service
-                    .get_selected_platforms(
-                        phone_number
-                    )
-                )
-
-                print("PENDING POST:")
-                print(pending_post)
-
-                print("PLATFORMS:")
-                print(platforms)
-
-                if not platforms:
-
-                    await send_message(
-
-                        phone_number,
-
-                        "Please select platform first."
+                    print(
+                        "UPDATED PLATFORMS:"
                     )
 
-                    return {
-                        "success": False
-                    }
-
-                # -----------------------------------------
-                # CHECK MISSING CONNECTIONS
-                # -----------------------------------------
-
-                missing = (
-                    post_service
-                    .get_missing_platforms(
-
-                        db,
-
-                        phone_number,
-
-                        platforms
-                    )
-                )
-
-                print("MISSING:")
-                print(missing)
-
-                if missing:
-
-                    connect_message = (
-                        "Connect your accounts:\n\n"
+                    print(
+                        selected_platforms
                     )
 
-                    for platform in missing:
-
-                        # -----------------------------
-                        # INSTAGRAM
-                        # -----------------------------
-
-                        if platform == "instagram":
-
-                            connect_message += (
-
-                                "Instagram:\n"
-                                
-                                f"https://aware-ambition-obvious.ngrok-free.dev/oauth/meta/connect"
-
-                                # f"https://YOUR_NGROK/oauth/meta/connect"
-
-                                f"?whatsapp_number={phone_number}\n\n"
-                            )
-
-                        # -----------------------------
-                        # LINKEDIN
-                        # -----------------------------
-
-                        elif platform == "linkedin":
-
-                            connect_message += (
-
-                                "LinkedIn:\n"
-                                f"https://aware-ambition-obvious.ngrok-free.dev/oauth/meta/connect"
-
-                                # f"https://YOUR_NGROK/oauth/linkedin/connect"
-
-                                f"?whatsapp_number={phone_number}\n\n"
-                            )
-
-                        # -----------------------------
-                        # TWITTER
-                        # -----------------------------
-
-                        elif platform == "twitter":
-
-                            connect_message += (
-                                "Twitter support coming soon.\n\n"
-                            )
-
-                        # -----------------------------
-                        # FACEBOOK
-                        # -----------------------------
-
-                        elif platform == "facebook":
-
-                            connect_message += (
-                                "Facebook support coming soon.\n\n"
-                            )
-
-                    await send_message(
-
-                        phone_number,
-
-                        connect_message
+                    pending_post = (
+                        session_service
+                        .get_pending_post(
+                            phone_number
+                        )
                     )
 
-                    return {
-                        "success": False
-                    }
+                    if pending_post:
 
-                # -----------------------------------------
-                # CREATE PUBLISH JOBS
-                # -----------------------------------------
-
-                jobs = (
-                    post_service
-                    .create_immediate_publish_jobs(
-
-                        db=db,
-
-                        whatsapp_number=
-                        phone_number,
-
-                        post_id=
                         pending_post[
-                            "post_id"
-                        ],
+                            "platforms"
+                        ] = (
+                            selected_platforms
+                        )
 
-                        platforms=
-                        platforms
+                        session_service.save_pending_post(
+
+                            phone_number,
+
+                            pending_post
+                        )
+
+                    await send_buttons(
+
+                        phone_number,
+
+                        (
+                            f"{platform.title()} "
+                            f"selected"
+                        ),
+
+                        [
+
+                            {
+                                "id":
+                                "post_now",
+
+                                "title":
+                                "Post Now"
+                            },
+
+                            {
+                                "id":
+                                "schedule_post",
+
+                                "title":
+                                "Schedule"
+                            }
+                        ]
                     )
-                )
 
-                print("CREATED JOBS:")
-                print(jobs)
+                    return {
+                        "success":
+                        True
+                    }
 
-                # -----------------------------------------
-                # START CELERY TASKS
-                # -----------------------------------------
+                # =====================================
+                # POST NOW
+                # =====================================
 
-                for job in jobs:
+                if button_id == "post_now":
 
-                    process_publish_job.delay(
-                        job.id
+                    print(
+                        "POST NOW CLICKED"
                     )
 
-                await send_message(
-
-                    phone_number,
-
-                    "✅ Publishing started"
-                )
-
-                # -----------------------------------------
-                # CLEAR SESSION
-                # -----------------------------------------
-
-                session_service.delete_pending_post(
-                    phone_number
-                )
-
-                session_service.delete_selected_platforms(
-                    phone_number
-                )
-
-                return {
-                    "success": True
-                }
-
-            # =============================================
-            # SCHEDULE FLOW
-            # =============================================
-
-            if button_reply == "action_schedule":
-
-                session_service.enable_schedule_mode(
-                    phone_number
-                )
-
-                await send_message(
-
-                    phone_number,
-
-                    (
-                        "Send schedule time.\n\n"
-                        "Examples:\n"
-                        "Tomorrow 9 PM\n"
-                        "After 2 hours\n"
-                        "Monday 8 AM"
+                    pending_post = (
+                        session_service
+                        .get_pending_post(
+                            phone_number
+                        )
                     )
+
+                    print("PENDING POST:")
+                    print(pending_post)
+
+                    if not pending_post:
+
+                        await send_message(
+
+                            phone_number,
+
+                            (
+                                "No pending post "
+                                "found."
+                            )
+                        )
+
+                        return {
+                            "success":
+                            False
+                        }
+
+                    # =================================
+                    # GET SELECTED PLATFORMS
+                    # =================================
+
+                    selected_platforms = (
+
+                        session_service
+                        .get_selected_platforms(
+                            phone_number
+                        )
+                    )
+
+                    print(
+                        "SELECTED PLATFORMS:"
+                    )
+
+                    print(
+                        selected_platforms
+                    )
+
+                    print(
+                        type(
+                            selected_platforms
+                        )
+                    )
+
+                    # =================================
+                    # CHECK MISSING
+                    # =================================
+
+                    missing_platforms = (
+
+                        post_service
+                        .get_missing_platforms(
+
+                            db=db,
+
+                            whatsapp_number=
+                            phone_number,
+
+                            platforms=
+                            selected_platforms
+                        )
+                    )
+
+                    print(
+                        "MISSING PLATFORMS:"
+                    )
+
+                    print(
+                        missing_platforms
+                    )
+
+                    # =================================
+                    # SEND CONNECT LINKS
+                    # =================================
+
+                    if missing_platforms:
+
+                        for platform in missing_platforms:
+
+                            if platform in [
+
+                                "instagram",
+
+                                "facebook"
+                            ]:
+
+                                connect_url = (
+
+                                    f"{settings.APP_BASE_URL}"
+                                    f"/oauth/meta/connect"
+                                    f"?whatsapp_number="
+                                    f"{phone_number}"
+                                )
+
+                            elif platform == "linkedin":
+
+                                connect_url = (
+
+                                    f"{settings.APP_BASE_URL}"
+                                    f"/oauth/linkedin/connect"
+                                    f"?whatsapp_number="
+                                    f"{phone_number}"
+                                )
+
+                            elif platform == "twitter":
+
+                                connect_url = (
+
+                                    f"{settings.APP_BASE_URL}"
+                                    f"/oauth/twitter/connect"
+                                    f"?whatsapp_number="
+                                    f"{phone_number}"
+                                )
+
+                            else:
+
+                                continue
+
+                            print(
+                                "CONNECT URL:"
+                            )
+
+                            print(
+                                connect_url
+                            )
+
+                            await send_message(
+
+                                phone_number,
+
+                                (
+                                    f"⚠️ Your "
+                                    f"{platform.title()} "
+                                    f"account is not connected.\n\n"
+
+                                    f"Connect here:\n"
+
+                                    f"{connect_url}"
+                                )
+                            )
+
+                        return {
+                            "success":
+                            True
+                        }
+
+                    # =================================
+                    # CREATE JOBS
+                    # =================================
+                    
+                    jobs = (
+                        
+                        
+
+                        post_service
+                        .create_immediate_publish_jobs(
+
+                            db=db,
+
+                            whatsapp_number=
+                            phone_number,
+
+                            pending_post=
+                            pending_post,
+
+                            platforms=
+                            selected_platforms
+                        )
+                    )
+                    
+                    
+
+                    # jobs = (
+
+                    #     post_service
+                    #     .create_immediate_publish_jobs(
+
+                    #         db=db,
+
+                    #         whatsapp_number=
+                    #         phone_number,
+
+                    #         pending_post=
+                    #         pending_post
+                    #     )
+                    # )
+
+                    print("CREATED JOBS:")
+                    print(jobs)
+
+                    await send_message(
+
+                        phone_number,
+
+                        (
+                            "🚀 Publishing "
+                            "started..."
+                        )
+                    )
+
+                    return {
+                        "success":
+                        True
+                    }
+
+                # =====================================
+                # SCHEDULE POST
+                # =====================================
+
+                if (
+                    button_id
+                    == "schedule_post"
+                ):
+
+                    session_service.set_waiting_for_schedule(
+
+                        phone_number,
+
+                        True
+                    )
+
+                    await send_message(
+
+                        phone_number,
+
+                        (
+                            "Send schedule time.\n\n"
+
+                            "Examples:\n"
+
+                            "- after 2 hours\n"
+
+                            "- tomorrow 9am\n"
+
+                            "- tonight 8pm"
+                        )
+                    )
+
+                    return {
+                        "success":
+                        True
+                    }
+
+            # =========================================
+            # TEXT MESSAGE
+            # =========================================
+
+            text = ""
+
+            if (
+                message.get("type")
+                == "text"
+            ):
+
+                text = (
+
+                    message["text"]
+                    .get("body", "")
                 )
-
-                return {
-                    "success": True
-                }
-
-        # =================================================
-        # TEXT MESSAGE
-        # =================================================
-
-        if message_type == "text":
-
-            text = (
-                message["text"]
-                ["body"]
-            )
 
             print("TEXT:")
             print(text)
 
-            # =============================================
-            # SCHEDULE TIME INPUT
-            # =============================================
+            # =========================================
+            # WAITING FOR SCHEDULE
+            # =========================================
 
-            if (
+            waiting_for_schedule = (
+
                 session_service
-                .is_schedule_mode(
+                .is_waiting_for_schedule(
                     phone_number
                 )
-            ):
+            )
+
+            if waiting_for_schedule:
 
                 scheduled_time = (
-                    parse_schedule_datetime(
+
+                    scheduler_service
+                    .parse_schedule_time(
                         text
                     )
                 )
-
-                print("SCHEDULED TIME:")
-                print(scheduled_time)
 
                 if not scheduled_time:
 
@@ -510,16 +608,18 @@ async def receive_message(
                         phone_number,
 
                         (
-                            "Could not understand time.\n"
-                            "Try again."
+                            "Invalid "
+                            "schedule time"
                         )
                     )
 
                     return {
-                        "success": False
+                        "success":
+                        False
                     }
 
                 pending_post = (
+
                     session_service
                     .get_pending_post(
                         phone_number
@@ -527,53 +627,28 @@ async def receive_message(
                 )
 
                 platforms = (
+
                     session_service
                     .get_selected_platforms(
                         phone_number
                     )
                 )
 
-                jobs = (
-                    post_service
-                    .create_scheduled_publish_jobs(
+                post_service.create_scheduled_publish_jobs(
 
-                        db=db,
+                    db=db,
 
-                        whatsapp_number=
-                        phone_number,
-
-                        post_id=
-                        pending_post[
-                            "post_id"
-                        ],
-
-                        platforms=
-                        platforms,
-
-                        scheduled_time=
-                        scheduled_time
-                    )
-                )
-
-                print("SCHEDULED JOBS:")
-                print(jobs)
-
-                await send_message(
-
+                    whatsapp_number=
                     phone_number,
 
-                    (
-                        f"✅ Post scheduled for:\n"
-                        f"{scheduled_time}"
-                    )
-                )
+                    pending_post=
+                    pending_post,
 
-                # -----------------------------------------
-                # CLEAR SESSION
-                # -----------------------------------------
+                    platforms=
+                    platforms,
 
-                session_service.disable_schedule_mode(
-                    phone_number
+                    scheduled_time=
+                    scheduled_time
                 )
 
                 session_service.delete_pending_post(
@@ -584,13 +659,31 @@ async def receive_message(
                     phone_number
                 )
 
+                session_service.set_waiting_for_schedule(
+
+                    phone_number,
+
+                    False
+                )
+
+                await send_message(
+
+                    phone_number,
+
+                    (
+                        f"✅ Post scheduled "
+                        f"for {scheduled_time}"
+                    )
+                )
+
                 return {
-                    "success": True
+                    "success":
+                    True
                 }
 
-            # =============================================
+            # =========================================
             # GENERATE AI POST
-            # =============================================
+            # =========================================
 
             ai_post = await (
                 post_service
@@ -607,10 +700,6 @@ async def receive_message(
             print("AI POST:")
             print(ai_post)
 
-            # ---------------------------------------------
-            # SAVE SESSION
-            # ---------------------------------------------
-
             session_service.save_pending_post(
 
                 phone_number,
@@ -618,34 +707,25 @@ async def receive_message(
                 ai_post
             )
 
-            # ---------------------------------------------
-            # SEND IMAGE PREVIEW
-            # ---------------------------------------------
-
             await send_image(
 
                 phone_number,
 
-                ai_post[
-                    "image_url"
-                ],
+                ai_post["image_url"],
 
-                ai_post[
-                    "caption"
-                ]
+                ai_post["caption"]
             )
 
-            # ---------------------------------------------
-            # SHOW PLATFORM BUTTONS
-            # ---------------------------------------------
+            await asyncio.sleep(2)
 
             await send_buttons(
 
                 phone_number,
 
-                "Choose platforms",
+                "Choose platform",
 
                 [
+
                     {
                         "id":
                         "platform_instagram",
@@ -653,6 +733,7 @@ async def receive_message(
                         "title":
                         "Instagram"
                     },
+
                     {
                         "id":
                         "platform_linkedin",
@@ -660,6 +741,7 @@ async def receive_message(
                         "title":
                         "LinkedIn"
                     },
+
                     {
                         "id":
                         "platform_twitter",
@@ -671,21 +753,21 @@ async def receive_message(
             )
 
             return {
-                "success": True
+                "success":
+                True
             }
 
-        return {
-            "success": True
-        }
+        except Exception as e:
 
-    except Exception as e:
+            print("================================")
+            print("WEBHOOK ERROR")
+            print("================================")
 
-        print("WEBHOOK ERROR:")
-        print(str(e))
+            print(str(e))
 
-        traceback.print_exc()
+            traceback.print_exc()
 
-        return {
-            "success": False,
-            "error": str(e)
-        }
+            return {
+                "success":
+                False
+            }

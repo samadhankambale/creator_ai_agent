@@ -1,70 +1,16 @@
 from fastapi import FastAPI
+from app.api.whatsapp_webhook import router as webhook_router
+from app.api.linkedin_oauth_routes import router as linkedin_router
+from app.api.oauth_routes import router as meta_router
 
-from app.api.whatsapp_webhook import (
-    router as whatsapp_router
-)
-
-from app.api.oauth_routes import (
-    router as oauth_router
-)
-
-from app.api.linkedin_oauth_routes import (
-    router as linkedin_oauth_router
-)
-
-app = FastAPI()
+app = FastAPI(title="Creator Agent")
 
 
 @app.get("/")
 async def root():
-
-    return {
-        "message": "Creator Agent Running"
-    }
+    return {"message": "Creator Agent Running"}
 
 
-app.include_router(
-    whatsapp_router
-)
-
-app.include_router(
-    linkedin_oauth_router
-)
-
-
-app.include_router(
-    oauth_router
-)
-
-
-
-
-# from fastapi import FastAPI
-# from app.api.instagram_routes import (
-#     router as instagram_router
-# )
-# from app.api.whatsapp_webhook import (
-#     router as whatsapp_router
-# )
-
-# from app.api.oauth_routes import (
-#     router as oauth_router
-# )
-
-# app = FastAPI(
-#     title="Creator Agent"
-# )
-
-# app.include_router(whatsapp_router)
-
-# app.include_router(oauth_router)
-
-# app.include_router(instagram_router)
-
-# @app.get("/")
-
-# async def root():
-
-#     return {
-#         "message": "Creator Agent Running"
-#     }
+app.include_router(webhook_router)
+app.include_router(linkedin_router)
+app.include_router(meta_router)   # handles /oauth/meta/* and /oauth/threads/*

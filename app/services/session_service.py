@@ -1,143 +1,65 @@
 import json
 import redis
-
 from app.core.config import settings
-
 
 redis_client = redis.Redis.from_url(
     settings.REDIS_URL,
     decode_responses=True
 )
 
+# TTL: session data expires after 2 hours of inactivity
+TTL = 7200
+
 
 class SessionService:
-    
-    def __init__(self):
+    """
+    All state stored in Redis so it survives server restarts
+    and works correctly across multiple workers.
+    """
 
-        self.pending_posts = {}
+    # ── Pending post ──────────────────────────────────
 
-        self.selected_platforms = {}
+    def save_pending_post(self, phone: str, data: dict):
+        redis_client.setex(f"session:pending:{phone}", TTL, json.dumps(data))
 
-        self.waiting_for_schedule = {}
+    def get_pending_post(self, phone: str) -> dict | None:
+        val = redis_client.get(f"session:pending:{phone}")
+        return json.loads(val) if val else None
 
-    # =================================================
-    # PENDING POST
-    # =================================================
+    def delete_pending_post(self, phone: str):
+        redis_client.delete(f"session:pending:{phone}")
 
-    def save_pending_post(
-        self,
-        phone_number,
-        post_data
-    ):
+    # ── Selected platforms ────────────────────────────
 
-        self.pending_posts[
-            phone_number
-        ] = post_data
+    def save_selected_platforms(self, phone: str, platforms: list):
+        redis_client.setex(f"session:platforms:{phone}", TTL, json.dumps(platforms))
 
-    def get_pending_post(
-        self,
-        phone_number
-    ):
+    def get_selected_platforms(self, phone: str) -> list:
+        val = redis_client.get(f"session:platforms:{phone}")
+        return json.loads(val) if val else []
 
-        return self.pending_posts.get(
-            phone_number
+    def delete_selected_platforms(self, phone: str):
+        redis_client.delete(f"session:platforms:{phone}")
+
+    # ── Schedule state ────────────────────────────────
+
+    def set_waiting_for_schedule(self, phone: str, value: bool):
+        if value:
+            redis_client.setex(f"session:schedule_wait:{phone}", TTL, "1")
+        else:
+            redis_client.delete(f"session:schedule_wait:{phone}")
+
+    def is_waiting_for_schedule(self, phone: str) -> bool:
+        return redis_client.exists(f"session:schedule_wait:{phone}") == 1
+
+    # ── Clear all session data for a user ─────────────
+
+    def clear_all(self, phone: str):
+        redis_client.delete(
+            f"session:pending:{phone}",
+            f"session:platforms:{phone}",
+            f"session:schedule_wait:{phone}",
         )
 
-    def delete_pending_post(
-        self,
-        phone_number
-    ):
 
-        if (
-            phone_number
-            in self.pending_posts
-        ):
-
-            del self.pending_posts[
-                phone_number
-            ]
-
-    # =================================================
-    # SELECTED PLATFORMS
-    # =================================================
-
-    def save_selected_platforms(
-        self,
-        phone_number,
-        platforms
-    ):
-
-        self.selected_platforms[
-            phone_number
-        ] = platforms
-
-    def get_selected_platforms(
-        self,
-        phone_number
-    ):
-
-        return self.selected_platforms.get(
-
-            phone_number,
-
-            []
-        )
-
-    def delete_selected_platforms(
-        self,
-        phone_number
-    ):
-
-        if (
-            phone_number
-            in self.selected_platforms
-        ):
-
-            del self.selected_platforms[
-                phone_number
-            ]
-
-    # =================================================
-    # SCHEDULE STATE
-    # =================================================
-
-    def set_waiting_for_schedule(
-        self,
-        phone_number,
-        value
-    ):
-
-        self.waiting_for_schedule[
-            phone_number
-        ] = value
-
-    def is_waiting_for_schedule(
-        self,
-        phone_number
-    ):
-
-        return self.waiting_for_schedule.get(
-
-            phone_number,
-
-            False
-        )
-
-    def clear_schedule_state(
-        self,
-        phone_number
-    ):
-
-        if (
-            phone_number
-            in self.waiting_for_schedule
-        ):
-
-            del self.waiting_for_schedule[
-                phone_number
-            ]
-
-
-session_service = (
-    SessionService()
-)
+session_service = SessionService()

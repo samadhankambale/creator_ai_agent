@@ -1,170 +1,53 @@
-from app.integrations.instagram.instagram_client import (
-    post_to_instagram
-)
-
-from app.integrations.linkedin.linkedin_client import (
-    post_to_linkedin
-)
+from app.integrations.instagram.instagram_client import post_to_instagram
+from app.integrations.linkedin.linkedin_client import post_to_linkedin
+from app.integrations.threads.threads_client import post_to_threads
 
 
 class PublishingService:
 
-    # =================================================
-    # MAIN PUBLISH METHOD
-    # =================================================
-
-    def publish_post(
+    def publish(
         self,
-        platform,
-        caption,
-        image_url,
-        account
-    ):
+        platform: str,
+        access_token: str,
+        platform_user_id: str,
+        caption: str,
+        image_url: str,
+    ) -> dict:
 
-        print("================================")
-        print("PUBLISHING SERVICE")
-        print("================================")
-
-        print("PLATFORM:")
-        print(platform)
-
-        print("CAPTION:")
-        print(caption)
-
-        print("IMAGE URL:")
-        print(image_url)
-
-        print("ACCOUNT:")
-        print(account)
-
-        # =============================================
-        # INSTAGRAM
-        # =============================================
+        print("=" * 40)
+        print(f"PUBLISHING TO: {platform}")
+        print(f"PLATFORM USER ID: {platform_user_id}")
+        print(f"CAPTION: {caption[:60]}...")
+        print("=" * 40)
 
         if platform == "instagram":
-
-            print(
-                "STARTING INSTAGRAM PUBLISH"
+            return post_to_instagram(
+                access_token=access_token,
+                platform_user_id=platform_user_id,
+                image_url=image_url,
+                caption=caption,
             )
-
-            result = (
-                post_to_instagram(
-
-                    access_token=
-                    account.access_token,
-
-                    account_id=
-                    account.platform_user_id,
-
-                    caption=
-                    caption,
-
-                    image_url=
-                    image_url
-                )
-            )
-
-            print(
-                "INSTAGRAM RESULT:"
-            )
-
-            print(result)
-
-            return result
-
-        # =============================================
-        # LINKEDIN
-        # =============================================
 
         elif platform == "linkedin":
-
-            print(
-                "STARTING LINKEDIN PUBLISH"
+            return post_to_linkedin(
+                access_token=access_token,
+                person_id=platform_user_id,
+                caption=caption,
+                image_url=image_url,
             )
 
-            result = (
-                post_to_linkedin(
-
-                    access_token=
-                    account.access_token,
-
-                    person_id=
-                    account.platform_user_id,
-
-                    caption=
-                    caption,
-
-                    image_url=
-                    image_url
-                )
+        elif platform == "threads":
+            return post_to_threads(
+                access_token=access_token,
+                threads_user_id=platform_user_id,
+                caption=caption,
+                image_url=image_url,
             )
-
-            print(
-                "LINKEDIN RESULT:"
-            )
-
-            print(result)
-
-            return result
-
-        # =============================================
-        # FACEBOOK
-        # =============================================
-
-        elif platform == "facebook":
-
-            print(
-                "FACEBOOK NOT IMPLEMENTED"
-            )
-
-            return {
-
-                "success":
-                False,
-
-                "error":
-                (
-                    "Facebook publishing "
-                    "not implemented yet"
-                )
-            }
-
-        # =============================================
-        # TWITTER
-        # =============================================
-
-        elif platform == "twitter":
-
-            print(
-                "TWITTER NOT IMPLEMENTED"
-            )
-
-            return {
-
-                "success":
-                False,
-
-                "error":
-                (
-                    "Twitter publishing "
-                    "not implemented yet"
-                )
-            }
-
-        # =============================================
-        # INVALID PLATFORM
-        # =============================================
 
         return {
-
-            "success":
-            False,
-
-            "error":
-            f"{platform} not supported"
+            "success": False,
+            "error": f"Platform '{platform}' not supported",
         }
 
 
-publishing_service = (
-    PublishingService()
-)
+publishing_service = PublishingService()

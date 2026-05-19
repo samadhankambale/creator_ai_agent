@@ -1,458 +1,281 @@
-import requests
-
-from fastapi import (
-    APIRouter,
-    Request,
-    Depends
-)
-
-from fastapi.responses import RedirectResponse
-
-from app.integrations.whatsapp.whatsapp_client import (
-    send_message,
-    send_buttons
-)
-
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
+import requests as http_requests
 
 from app.core.config import settings
-
-from app.database.dependencies import (
-    get_db
-)
-
-from app.integrations.linkedin.linkedin_client import (
-    get_linkedin_profile
-)
-
-from app.services.social_account_service import (
-    social_account_service
-)
-
-from app.services.meta_service import (
+from app.database.dependencies import get_db
+from app.integrations.meta.meta_client import (
     exchange_code_for_token,
-    get_instagram_business_account
+    get_facebook_pages,
+    get_instagram_business_account,
 )
+from app.integrations.whatsapp.whatsapp_client import send_message_sync, send_buttons_sync
+from app.services.social_account_service import social_account_service
+
+router = APIRouter(tags=["Meta OAuth"])
 
 
-router = APIRouter()
-
-
-# =====================================================
-# META CONNECT
-# =====================================================
+# ──────────────────────────────────────────────────────────────
+# INSTAGRAM CONNECT
+# ──────────────────────────────────────────────────────────────
 
 @router.get("/oauth/meta/connect")
-async def connect_meta(
-    whatsapp_number: str
-):
-
+async def connect_instagram(whatsapp_number: str):
     oauth_url = (
-
         "https://www.facebook.com/v20.0/dialog/oauth"
-
         f"?client_id={settings.META_APP_ID}"
-
         f"&redirect_uri={settings.META_REDIRECT_URI}"
-
-        "&scope=instagram_basic,"
-        "instagram_content_publish,"
-        "pages_show_list"
-
-        f"&state={whatsapp_number}"
+        "&scope=instagram_basic,instagram_content_publish,pages_show_list"
+        f"&state={whatsapp_number}|instagram"
     )
-
-    return RedirectResponse(
-        oauth_url
-    )
+    print("INSTAGRAM AUTH URL:", oauth_url)
+    return RedirectResponse(url=oauth_url)
 
 
-# =====================================================
-# LINKEDIN CONNECT
-# =====================================================
+# ──────────────────────────────────────────────────────────────
+# THREADS CONNECT — uses THREADS_APP_ID (different from META)
+# ──────────────────────────────────────────────────────────────
 
-@router.get("/oauth/linkedin/connect")
-async def connect_linkedin(
-    whatsapp_number: str
-):
-
+@router.get("/oauth/threads/connect")
+async def connect_threads(whatsapp_number: str):
     oauth_url = (
-
-        "https://www.linkedin.com/oauth/v2/authorization"
-
-        f"?client_id={settings.LINKEDIN_CLIENT_ID}"
-
+        "https://threads.net/oauth/authorize"
+        f"?client_id={settings.THREADS_APP_ID}"
+        f"&redirect_uri={settings.THREADS_REDIRECT_URI}"
+        "&scope=threads_basic,threads_content_publish"
         "&response_type=code"
-
-        f"&redirect_uri={settings.LINKEDIN_REDIRECT_URI}"
-
-        "&scope="
-
-        "openid%20"
-
-        "profile%20"
-
-        "email%20"
-
-        "w_member_social"
-
-        f"&state={whatsapp_number}"
+        f"&state={whatsapp_number}|threads"
     )
+    print("THREADS AUTH URL:", oauth_url)
+    return RedirectResponse(url=oauth_url)
 
-    return {
 
-        "oauth_url": oauth_url
-    }
-    
-    
-# =====================================================
-# META CALLBACK
-# =====================================================
+# ──────────────────────────────────────────────────────────────
+# INSTAGRAM CALLBACK
+# ──────────────────────────────────────────────────────────────
 
 @router.get("/oauth/meta/callback")
 async def meta_callback(
     request: Request,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
+    code = request.query_params.get("code")
+    state = request.query_params.get("state", "")
+    error = request.query_params.get("error")
 
-    try:
+    whatsapp_number = state.split("|")[0] if state else None
 
-        # ----------------------------------------------
-        # GET CODE
-        # ----------------------------------------------
+    print("=" * 40)
+    print("META CALLBACK")
+    print("CODE:", code)
+    print("WHATSAPP NUMBER:", whatsapp_number)
+    print("=" * 40)
 
-        code = request.query_params.get(
-            "code"
+    if error:
+        return HTMLResponse(
+            content=_html_page("Authorization Failed", error),
+            status_code=400,
         )
-
-        whatsapp_number = request.query_params.get(
-            "state"
-        )
-
-        if not code:
-
-            return {
-                "error": "No code received"
-            }
-
-        # ----------------------------------------------
-        # EXCHANGE TOKEN
-        # ----------------------------------------------
-
-        token_data = exchange_code_for_token(
-            code
-        )
-
-        print("META TOKEN RESPONSE:")
-        print(token_data)
-
-        access_token = token_data.get(
-            "access_token"
-        )
-
-        if not access_token:
-
-            return {
-                "error":
-                "Could not get access token"
-            }
-
-        # ----------------------------------------------
-        # GET FACEBOOK PAGES
-        # ----------------------------------------------
-
-        pages_response = requests.get(
-
-            "https://graph.facebook.com/v20.0/me/accounts",
-
-            params={
-                "access_token":
-                access_token
-            }
-        )
-
-        pages_data = pages_response.json()
-
-        print("PAGES DATA:")
-        print(pages_data)
-
-        pages = pages_data.get(
-            "data",
-            []
-        )
-
-        if not pages:
-
-            return {
-                "error":
-                "No Facebook pages found"
-            }
-
-        page = pages[0]
-
-        page_id = page["id"]
-
-        page_access_token = page[
-            "access_token"
-        ]
-
-        # ----------------------------------------------
-        # GET INSTAGRAM BUSINESS ACCOUNT
-        # ----------------------------------------------
-
-        instagram_response = requests.get(
-
-            f"https://graph.facebook.com/v20.0/{page_id}",
-
-            params={
-
-                "fields":
-                "instagram_business_account",
-
-                "access_token":
-                page_access_token
-            }
-        )
-
-        instagram_data = (
-            instagram_response.json()
-        )
-
-        print("INSTAGRAM DATA:")
-        print(instagram_data)
-
-        instagram_business = (
-            instagram_data.get(
-                "instagram_business_account"
-            )
-        )
-
-        if not instagram_business:
-
-            return {
-                "error":
-                "Instagram Business Account not found"
-            }
-
-        instagram_user_id = (
-            instagram_business["id"]
-        )
-
-        # ----------------------------------------------
-        # SAVE ACCOUNT
-        # ----------------------------------------------
-
-        social_account_service.connect_platform_account(
-
-            db=db,
-
-            whatsapp_number=
-            whatsapp_number,
-
-            platform="instagram",
-
-            access_token=
-            page_access_token,
-
-            platform_user_id=
-            instagram_user_id,
-
-            username="instagram_user"
-        )
-
-        # ----------------------------------------------
-        # SEND WHATSAPP SUCCESS MESSAGE
-        # ----------------------------------------------
-
-        await send_message(
-
-            whatsapp_number,
-
-            (
-                "✅ Instagram connected successfully.\n\n"
-                "Now choose what you want to do."
-            )
-        )
-
-        # ----------------------------------------------
-        # SEND ACTION BUTTONS
-        # ----------------------------------------------
-
-        await send_buttons(
-
-            whatsapp_number,
-
-            "Choose action",
-
-            [
-                {
-                    "id":
-                    "action_post_now",
-
-                    "title":
-                    "Post Now"
-                },
-                {
-                    "id":
-                    "action_schedule",
-
-                    "title":
-                    "Schedule"
-                }
-            ]
-        )
-
-        # ----------------------------------------------
-        # RETURN SUCCESS PAGE
-        # ----------------------------------------------
-
-        return {
-
-            "success": True,
-
-            "message":
-            "Instagram connected successfully. Return to WhatsApp."
-        }
-
-    except Exception as e:
-
-        print("META CALLBACK ERROR:")
-        print(str(e))
-
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-# =====================================================
-# LINKEDIN CALLBACK
-# =====================================================
-
-@router.get("/oauth/linkedin/callback")
-async def linkedin_callback(
-    request: Request,
-    db: Session = Depends(get_db)
-):
-
-    code = request.query_params.get(
-        "code"
-    )
 
     if not code:
+        return HTMLResponse(
+            content=_html_page("Authorization Failed", "No authorization code received."),
+            status_code=400,
+        )
 
-        return {
-            "error": (
-                "No code received"
+    if not whatsapp_number:
+        return HTMLResponse(
+            content=_html_page(
+                "Authorization Failed",
+                "Missing WhatsApp number. Please try connecting again from WhatsApp.",
+            ),
+            status_code=400,
+        )
+
+    try:
+        token_data = exchange_code_for_token(code)
+        access_token = token_data.get("access_token")
+
+        if not access_token:
+            return HTMLResponse(
+                content=_html_page("Token Exchange Failed", str(token_data)),
+                status_code=400,
             )
-        }
 
-    # -------------------------------------------------
-    # EXCHANGE TOKEN
-    # -------------------------------------------------
+        pages_data = get_facebook_pages(access_token)
+        pages = pages_data.get("data", [])
 
-    token_url = (
-        "https://www.linkedin.com/oauth/v2/accessToken"
-    )
+        if not pages:
+            return HTMLResponse(
+                content=_html_page(
+                    "No Facebook Pages Found",
+                    "Please create a Facebook page linked to your Instagram Business account.",
+                ),
+                status_code=400,
+            )
 
-    payload = {
+        ig_user_id = None
+        page_access_token = None
 
-        "grant_type":
-        "authorization_code",
+        for page in pages:
+            ig_data = get_instagram_business_account(page["id"], page["access_token"])
+            ig_business = ig_data.get("instagram_business_account")
+            if ig_business:
+                ig_user_id = ig_business["id"]
+                page_access_token = page["access_token"]
+                break
 
-        "code":
-        code,
+        if not ig_user_id:
+            return HTMLResponse(
+                content=_html_page(
+                    "Instagram Business Account Not Found",
+                    "Make sure your Instagram is a Business/Creator account linked to a Facebook page.",
+                ),
+                status_code=400,
+            )
 
-        "redirect_uri":
-        settings.LINKEDIN_REDIRECT_URI,
+        social_account_service.connect_platform_account(
+            db=db,
+            whatsapp_number=whatsapp_number,
+            platform="instagram",
+            access_token=page_access_token,
+            platform_user_id=ig_user_id,
+            username="instagram_user",
+        )
 
-        "client_id":
-        settings.LINKEDIN_CLIENT_ID,
+        print("INSTAGRAM CONNECTED:", ig_user_id, "for", whatsapp_number)
 
-        "client_secret":
-        settings.LINKEDIN_CLIENT_SECRET
-    }
+        send_message_sync(whatsapp_number, "✅ Instagram connected successfully!")
+        send_buttons_sync(
+            whatsapp_number,
+            "Choose action",
+            [
+                {"id": "post_now", "title": "Post Now"},
+                {"id": "schedule_post", "title": "Schedule"},
+            ],
+        )
 
-    token_response = requests.post(
-        token_url,
-        data=payload
-    )
+        return HTMLResponse(
+            content=_html_page(
+                "✅ Instagram Connected!",
+                "You can close this tab and return to WhatsApp.",
+            ),
+            status_code=200,
+        )
 
-    token_data = token_response.json()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return HTMLResponse(
+            content=_html_page("Connection Failed", str(e)),
+            status_code=500,
+        )
 
-    print("LINKEDIN TOKEN:")
-    print(token_data)
 
-    access_token = token_data.get(
-        "access_token"
-    )
+# ──────────────────────────────────────────────────────────────
+# THREADS CALLBACK
+# ──────────────────────────────────────────────────────────────
 
-    if not access_token:
+@router.get("/oauth/threads/callback")
+async def threads_callback(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    code = request.query_params.get("code")
+    state = request.query_params.get("state", "")
+    error = request.query_params.get("error")
 
-        return {
+    whatsapp_number = state.split("|")[0] if state else None
 
-            "error":
-            "Could not get LinkedIn token",
+    print("=" * 40)
+    print("THREADS CALLBACK")
+    print("CODE:", code)
+    print("WHATSAPP NUMBER:", whatsapp_number)
+    print("=" * 40)
 
-            "details":
-            token_data
-        }
+    if error:
+        return HTMLResponse(
+            content=_html_page("Authorization Failed", error),
+            status_code=400,
+        )
 
-    # -------------------------------------------------
-    # GET PROFILE
-    # -------------------------------------------------
+    if not code or not whatsapp_number:
+        return HTMLResponse(
+            content=_html_page("Authorization Failed", "Missing code or WhatsApp number."),
+            status_code=400,
+        )
 
-    profile = await get_linkedin_profile(
-        access_token
-    )
+    try:
+        # Exchange code using THREADS_APP_ID + THREADS_APP_SECRET
+        token_resp = http_requests.post(
+            "https://graph.threads.net/oauth/access_token",
+            data={
+                "client_id": settings.THREADS_APP_ID,
+                "client_secret": settings.THREADS_APP_SECRET,
+                "redirect_uri": settings.THREADS_REDIRECT_URI,
+                "code": code,
+                "grant_type": "authorization_code",
+            },
+            timeout=30,
+        )
+        token_data = token_resp.json()
+        print("THREADS TOKEN:", token_data)
 
-    linkedin_user_id = profile.get(
-        "sub"
-    )
+        access_token = token_data.get("access_token")
+        threads_user_id = str(token_data.get("user_id", ""))
 
-    full_name = profile.get(
-        "name"
-    )
+        if not access_token or not threads_user_id:
+            return HTMLResponse(
+                content=_html_page("Token Exchange Failed", str(token_data)),
+                status_code=400,
+            )
 
-    # -------------------------------------------------
-    # TEMP USER
-    # -------------------------------------------------
+        social_account_service.connect_platform_account(
+            db=db,
+            whatsapp_number=whatsapp_number,
+            platform="threads",
+            access_token=access_token,
+            platform_user_id=threads_user_id,
+            username="threads_user",
+        )
 
-    # later replace using OAuth state
-    
-    
-    whatsapp_number = request.query_params.get("state")
+        print("THREADS CONNECTED:", threads_user_id, "for", whatsapp_number)
 
-    # whatsapp_number = "917448101276"
+        send_message_sync(whatsapp_number, "✅ Threads connected successfully!")
+        send_buttons_sync(
+            whatsapp_number,
+            "Choose action",
+            [
+                {"id": "post_now", "title": "Post Now"},
+                {"id": "schedule_post", "title": "Schedule"},
+            ],
+        )
 
-    # -------------------------------------------------
-    # SAVE ACCOUNT
-    # -------------------------------------------------
+        return HTMLResponse(
+            content=_html_page(
+                "✅ Threads Connected!",
+                "You can close this tab and return to WhatsApp.",
+            ),
+            status_code=200,
+        )
 
-    social_account_service.connect_platform_account(
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return HTMLResponse(
+            content=_html_page("Connection Failed", str(e)),
+            status_code=500,
+        )
 
-        db=db,
 
-        whatsapp_number=
-        whatsapp_number,
-
-        platform="linkedin",
-
-        access_token=
-        access_token,
-
-        platform_user_id=
-        linkedin_user_id,
-
-        username=full_name
-    )
-
-    return {
-
-        "success": True,
-
-        "message": (
-            "LinkedIn connected successfully"
-        ),
-
-        "profile": profile
-    }
+def _html_page(title: str, message: str) -> str:
+    return f"""
+    <html>
+      <head><title>{title}</title></head>
+      <body style="font-family:Arial;text-align:center;padding-top:80px;max-width:500px;margin:auto">
+        <h2>{title}</h2>
+        <p>{message}</p>
+      </body>
+    </html>
+    """

@@ -1,478 +1,209 @@
-import os
-import tempfile
 import requests
-
-from app.core.config import (
-    settings
-)
+from app.core.config import settings
 
 
-# =====================================================
-# AUTH URL
-# =====================================================
+# ──────────────────────────────────────────────────────────────
+# OAUTH
+# ──────────────────────────────────────────────────────────────
 
-def get_linkedin_auth_url(
-    whatsapp_number
-):
-
-    scope = (
-        "w_member_social"
-    )
-
-    url = (
-
+def get_linkedin_auth_url(whatsapp_number: str) -> str:
+    """
+    IMPORTANT: scope must include openid + profile + email
+    so the /userinfo endpoint works. w_member_social alone
+    gives 403 on profile fetch.
+    """
+    return (
         "https://www.linkedin.com/oauth/v2/authorization"
-
-        f"?response_type=code"
-
-        f"&client_id={settings.LINKEDIN_CLIENT_ID}"
-
+        f"?client_id={settings.LINKEDIN_CLIENT_ID}"
+        "&response_type=code"
         f"&redirect_uri={settings.LINKEDIN_REDIRECT_URI}"
-
-        f"&scope={scope}"
-
+        "&scope=openid%20profile%20email%20w_member_social"
         f"&state={whatsapp_number}"
     )
 
-    return url
 
-
-# =====================================================
-# EXCHANGE TOKEN
-# =====================================================
-
-def exchange_code_for_token(
-    code
-):
-
-    url = (
-        "https://www.linkedin.com/oauth/v2/accessToken"
-    )
-
-    payload = {
-
-        "grant_type":
-        "authorization_code",
-
-        "code":
-        code,
-
-        "redirect_uri":
-        settings.LINKEDIN_REDIRECT_URI,
-
-        "client_id":
-        settings.LINKEDIN_CLIENT_ID,
-
-        "client_secret":
-        settings.LINKEDIN_CLIENT_SECRET
-    }
-
+def exchange_code_for_token(code: str) -> dict:
     response = requests.post(
-
-        url,
-
-        data=payload
+        "https://www.linkedin.com/oauth/v2/accessToken",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": settings.LINKEDIN_REDIRECT_URI,
+            "client_id": settings.LINKEDIN_CLIENT_ID,
+            "client_secret": settings.LINKEDIN_CLIENT_SECRET,
+        },
+        timeout=30,
     )
-
     return response.json()
 
 
-# =====================================================
-# GET MEMBER PROFILE
-# =====================================================
-
-def get_linkedin_profile(
-    access_token
-):
-
-    url = (
-        "https://api.linkedin.com/v2/me"
-    )
-
-    headers = {
-
-        "Authorization":
-        f"Bearer {access_token}"
-    }
-
+def get_linkedin_profile(access_token: str) -> dict:
+    """
+    Uses OpenID /userinfo endpoint.
+    Returns: { sub, name, given_name, family_name, email, picture }
+    Requires openid + profile scopes — NOT the old /v2/me endpoint.
+    """
     response = requests.get(
-
-        url,
-
-        headers=headers
+        "https://api.linkedin.com/v2/userinfo",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+        },
+        timeout=30,
     )
-
-    profile = response.json()
-
-    print("LINKEDIN PROFILE:")
-    print(profile)
-
-    return profile
+    data = response.json()
+    print("LINKEDIN USERINFO:", data)
+    return data
 
 
-# =====================================================
-# DOWNLOAD IMAGE
-# =====================================================
+# ──────────────────────────────────────────────────────────────
+# PUBLISHING
+# ──────────────────────────────────────────────────────────────
 
-def download_image(
-    image_url
-):
-
-    response = requests.get(
-        image_url
-    )
-
-    temp_file = tempfile.NamedTemporaryFile(
-
-        delete=False,
-
-        suffix=".jpg"
-    )
-
-    temp_file.write(
-        response.content
-    )
-
-    temp_file.close()
-
-    return temp_file.name
-
-
-# =====================================================
-# REGISTER IMAGE UPLOAD
-# =====================================================
-
-def register_image_upload(
-    access_token,
-    member_urn
-):
-
-    url = (
-        "https://api.linkedin.com/v2/assets?action=registerUpload"
-    )
-
+def _upload_image(access_token: str, person_urn: str, image_url: str) -> str | None:
+    """
+    Upload image to LinkedIn media and return asset URN.
+    Steps: register upload → PUT bytes → return asset URN.
+    """
     headers = {
-
-        "Authorization":
-        f"Bearer {access_token}",
-
-        "Content-Type":
-        "application/json"
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "X-Restli-Protocol-Version": "2.0.0",
     }
 
-    payload = {
-
-        "registerUploadRequest": {
-
-            "recipes": [
-
-                "urn:li:digitalmediaRecipe:feedshare-image"
-            ],
-
-            "owner":
-            member_urn,
-
-            "serviceRelationships": [
-
-                {
-
-                    "relationshipType":
-                    "OWNER",
-
-                    "identifier":
-                    "urn:li:userGeneratedContent"
-                }
-            ]
-        }
-    }
-
-    response = requests.post(
-
-        url,
-
+    # Step 1: Register upload
+    register_resp = requests.post(
+        "https://api.linkedin.com/v2/assets?action=registerUpload",
         headers=headers,
-
-        json=payload
-    )
-
-    return response.json()
-
-
-# =====================================================
-# UPLOAD IMAGE
-# =====================================================
-
-def upload_image_binary(
-    upload_url,
-    image_path
-):
-
-    with open(
-        image_path,
-        "rb"
-    ) as image_file:
-
-        headers = {
-
-            "Content-Type":
-            "image/jpeg"
-        }
-
-        response = requests.put(
-
-            upload_url,
-
-            headers=headers,
-
-            data=image_file
-        )
-
-    return response.status_code
-
-
-# =====================================================
-# CREATE POST
-# =====================================================
-
-def create_linkedin_post(
-    access_token,
-    member_urn,
-    caption,
-    asset
-):
-
-    url = (
-        "https://api.linkedin.com/v2/ugcPosts"
-    )
-
-    headers = {
-
-        "Authorization":
-        f"Bearer {access_token}",
-
-        "X-Restli-Protocol-Version":
-        "2.0.0",
-
-        "Content-Type":
-        "application/json"
-    }
-
-    payload = {
-
-        "author":
-        member_urn,
-
-        "lifecycleState":
-        "PUBLISHED",
-
-        "specificContent": {
-
-            "com.linkedin.ugc.ShareContent": {
-
-                "shareCommentary": {
-
-                    "text":
-                    caption
-                },
-
-                "shareMediaCategory":
-                "IMAGE",
-
-                "media": [
-
+        json={
+            "registerUploadRequest": {
+                "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
+                "owner": person_urn,
+                "serviceRelationships": [
                     {
-
-                        "status":
-                        "READY",
-
-                        "description": {
-
-                            "text":
-                            caption
-                        },
-
-                        "media":
-                        asset,
-
-                        "title": {
-
-                            "text":
-                            "AI Generated Post"
-                        }
+                        "relationshipType": "OWNER",
+                        "identifier": "urn:li:userGeneratedContent",
                     }
-                ]
+                ],
             }
         },
-
-        "visibility": {
-
-            "com.linkedin.ugc.MemberNetworkVisibility":
-            "PUBLIC"
-        }
-    }
-
-    response = requests.post(
-
-        url,
-
-        headers=headers,
-
-        json=payload
+        timeout=30,
     )
+    register_data = register_resp.json()
+    print("LINKEDIN REGISTER UPLOAD:", register_data)
 
-    return response.json()
+    if "value" not in register_data:
+        print("LINKEDIN REGISTER FAILED:", register_data)
+        return None
 
+    upload_url = (
+        register_data["value"]
+        ["uploadMechanism"]
+        ["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]
+        ["uploadUrl"]
+    )
+    asset_urn = register_data["value"]["asset"]
 
-# =====================================================
-# MAIN PUBLISH
-# =====================================================
+    # Step 2: Download image from Pollinations and PUT to LinkedIn
+    image_bytes = requests.get(image_url, timeout=60).content
+    put_resp = requests.put(
+        upload_url,
+        data=image_bytes,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=60,
+    )
+    print("LINKEDIN IMAGE PUT STATUS:", put_resp.status_code)
+
+    if put_resp.status_code not in (200, 201):
+        return None
+
+    return asset_urn
+
 
 def post_to_linkedin(
-    access_token,
-    member_id,
-    caption,
-    image_url
-):
+    access_token: str,
+    person_id: str,
+    caption: str,
+    image_url: str,
+) -> dict:
+    """
+    Post image + caption to LinkedIn via ugcPosts API.
+    Falls back to text-only if image upload fails.
+    """
+    person_urn = f"urn:li:person:{person_id}"
 
-    try:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "X-Restli-Protocol-Version": "2.0.0",
+    }
 
-        print("================================")
-        print("LINKEDIN PUBLISH START")
-        print("================================")
+    print("=" * 40)
+    print("LINKEDIN POST: uploading image")
+    print("PERSON URN:", person_urn)
+    print("=" * 40)
 
-        member_urn = (
-            f"urn:li:person:{member_id}"
-        )
+    asset_urn = _upload_image(access_token, person_urn, image_url)
 
-        print("MEMBER URN:")
-        print(member_urn)
-
-        # ============================================
-        # DOWNLOAD IMAGE
-        # ============================================
-
-        image_path = download_image(
-            image_url
-        )
-
-        # ============================================
-        # REGISTER UPLOAD
-        # ============================================
-
-        register_response = (
-            register_image_upload(
-
-                access_token,
-
-                member_urn
-            )
-        )
-
-        print("REGISTER RESPONSE:")
-        print(register_response)
-
-        upload_data = (
-
-            register_response[
-                "value"
-            ][
-                "uploadMechanism"
-            ][
-                "com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"
-            ]
-        )
-
-        upload_url = (
-            upload_data[
-                "uploadUrl"
-            ]
-        )
-
-        asset = (
-            register_response[
-                "value"
-            ][
-                "asset"
-            ]
-        )
-
-        # ============================================
-        # UPLOAD IMAGE
-        # ============================================
-
-        upload_status = (
-            upload_image_binary(
-
-                upload_url,
-
-                image_path
-            )
-        )
-
-        print("UPLOAD STATUS:")
-        print(upload_status)
-
-        # ============================================
-        # CREATE POST
-        # ============================================
-
-        post_response = (
-            create_linkedin_post(
-
-                access_token,
-
-                member_urn,
-
-                caption,
-
-                asset
-            )
-        )
-
-        print("POST RESPONSE:")
-        print(post_response)
-
-        if os.path.exists(
-            image_path
-        ):
-
-            os.remove(
-                image_path
-            )
-
-        if (
-            "id"
-            in post_response
-        ):
-
-            return {
-
-                "success":
-                True,
-
-                "response":
-                post_response
-            }
-
-        return {
-
-            "success":
-            False,
-
-            "response":
-            post_response
+    if asset_urn:
+        post_body = {
+            "author": person_urn,
+            "lifecycleState": "PUBLISHED",
+            "specificContent": {
+                "com.linkedin.ugc.ShareContent": {
+                    "shareCommentary": {"text": caption},
+                    "shareMediaCategory": "IMAGE",
+                    "media": [
+                        {
+                            "status": "READY",
+                            "description": {"text": caption[:200]},
+                            "media": asset_urn,
+                            "title": {"text": "Post"},
+                        }
+                    ],
+                }
+            },
+            "visibility": {
+                "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+            },
+        }
+    else:
+        print("LINKEDIN: image upload failed, falling back to text only")
+        post_body = {
+            "author": person_urn,
+            "lifecycleState": "PUBLISHED",
+            "specificContent": {
+                "com.linkedin.ugc.ShareContent": {
+                    "shareCommentary": {"text": caption},
+                    "shareMediaCategory": "NONE",
+                }
+            },
+            "visibility": {
+                "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+            },
         }
 
-    except Exception as e:
+    print("LINKEDIN POST BODY:", post_body)
 
-        print("LINKEDIN ERROR:")
-        print(str(e))
+    response = requests.post(
+        "https://api.linkedin.com/v2/ugcPosts",
+        headers=headers,
+        json=post_body,
+        timeout=30,
+    )
 
+    print("LINKEDIN POST STATUS:", response.status_code)
+    print("LINKEDIN POST RESPONSE:", response.text)
+
+    if response.status_code in (200, 201):
         return {
-
-            "success":
-            False,
-
-            "error":
-            str(e)
+            "success": True,
+            "platform": "linkedin",
+            "post_id": response.headers.get("x-restli-id", ""),
         }
+
+    return {
+        "success": False,
+        "error": "LinkedIn post failed",
+        "details": response.text,
+        "status_code": response.status_code,
+    }

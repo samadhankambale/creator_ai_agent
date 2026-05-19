@@ -1,302 +1,73 @@
-import time
 import requests
 
+GRAPH_URL = "https://graph.facebook.com/v20.0"
 
-# ======================================================
-# CREATE MEDIA CONTAINER
-# ======================================================
-
-def create_media_container(
-    image_url,
-    caption,
-    access_token,
-    instagram_user_id
-):
-
-    try:
-
-        print("===================================")
-        print("CREATE MEDIA CONTAINER")
-        print("===================================")
-
-        print("IMAGE URL:")
-        print(image_url)
-
-        print("INSTAGRAM USER ID:")
-        print(instagram_user_id)
-
-        print("ACCESS TOKEN:")
-        print(access_token)
-
-        url = (
-            f"https://graph.facebook.com/v20.0/"
-            f"{instagram_user_id}/media"
-        )
-
-        payload = {
-
-            "image_url":
-            image_url,
-
-            "caption":
-            caption[:2200],
-
-            "access_token":
-            access_token
-        }
-
-        response = requests.post(
-
-            url,
-
-            data=payload
-        )
-
-        print("STATUS CODE:")
-        print(response.status_code)
-
-        data = response.json()
-
-        print("INSTAGRAM CREATE RESPONSE:")
-        print(data)
-
-        # ------------------------------------------
-        # SUCCESS
-        # ------------------------------------------
-
-        if "id" in data:
-
-            return {
-
-                "success": True,
-
-                "creation_id":
-                data["id"],
-
-                "response":
-                data
-            }
-
-        # ------------------------------------------
-        # FAILURE
-        # ------------------------------------------
-
-        return {
-
-            "success": False,
-
-            "response":
-            data
-        }
-
-    except Exception as e:
-
-        print("CREATE MEDIA ERROR:")
-        print(str(e))
-
-        return {
-
-            "success": False,
-
-            "error": str(e)
-        }
-
-
-# ======================================================
-# PUBLISH MEDIA
-# ======================================================
-
-def publish_media(
-    creation_id,
-    access_token,
-    instagram_user_id
-):
-
-    try:
-
-        print("===================================")
-        print("PUBLISH MEDIA")
-        print("===================================")
-
-        print("CREATION ID:")
-        print(creation_id)
-
-        url = (
-            f"https://graph.facebook.com/v20.0/"
-            f"{instagram_user_id}/media_publish"
-        )
-
-        payload = {
-
-            "creation_id":
-            creation_id,
-
-            "access_token":
-            access_token
-        }
-
-        response = requests.post(
-
-            url,
-
-            data=payload
-        )
-
-        print("PUBLISH STATUS:")
-        print(response.status_code)
-
-        data = response.json()
-
-        print("PUBLISH RESPONSE:")
-        print(data)
-
-        # ------------------------------------------
-        # SUCCESS
-        # ------------------------------------------
-
-        if "id" in data:
-
-            return {
-
-                "success": True,
-
-                "response":
-                data
-            }
-
-        # ------------------------------------------
-        # FAILURE
-        # ------------------------------------------
-
-        return {
-
-            "success": False,
-
-            "response":
-            data
-        }
-
-    except Exception as e:
-
-        print("PUBLISH ERROR:")
-        print(str(e))
-
-        return {
-
-            "success": False,
-
-            "error": str(e)
-        }
-
-
-# ======================================================
-# MAIN INSTAGRAM POST
-# ======================================================
 
 def post_to_instagram(
-    image_url,
-    caption,
-    access_token,
-    instagram_user_id
-):
+    access_token: str,
+    platform_user_id: str,   # matches publishing_service.publish() call
+    image_url: str,
+    caption: str,
+    ig_user_id: str = None,  # alias for backward compat
+) -> dict:
+    """
+    Two-step Instagram publish:
+    1. Create media container
+    2. Publish the container
+    """
 
-    try:
+    # support both parameter names
+    user_id = platform_user_id or ig_user_id
 
-        print("===================================")
-        print("START INSTAGRAM POST")
-        print("===================================")
+    print("=" * 40)
+    print("INSTAGRAM: creating media container")
+    print("IG USER ID:", user_id)
+    print("IMAGE URL:", image_url)
+    print("=" * 40)
 
-        # ------------------------------------------
-        # CREATE CONTAINER
-        # ------------------------------------------
+    # ── Step 1: create container ──────────────────────
+    container_resp = requests.post(
+        f"{GRAPH_URL}/{user_id}/media",
+        data={
+            "image_url": image_url,
+            "caption": caption,
+            "access_token": access_token,
+        },
+        timeout=30,
+    )
+    container_data = container_resp.json()
+    print("CONTAINER RESPONSE:", container_data)
 
-        container = create_media_container(
-
-            image_url=image_url,
-
-            caption=caption,
-
-            access_token=access_token,
-
-            instagram_user_id=
-            instagram_user_id
-        )
-
-        print("CONTAINER RESULT:")
-        print(container)
-
-        if not container["success"]:
-
-            return {
-
-                "success": False,
-
-                "response":
-                container
-            }
-
-        creation_id = (
-            container["creation_id"]
-        )
-
-        # ------------------------------------------
-        # WAIT FOR META PROCESSING
-        # ------------------------------------------
-
-        print("WAITING FOR META PROCESSING")
-
-        time.sleep(5)
-
-        # ------------------------------------------
-        # PUBLISH MEDIA
-        # ------------------------------------------
-
-        publish_result = publish_media(
-
-            creation_id=creation_id,
-
-            access_token=access_token,
-
-            instagram_user_id=
-            instagram_user_id
-        )
-
-        print("FINAL PUBLISH RESULT:")
-        print(publish_result)
-
-        if not publish_result["success"]:
-
-            return {
-
-                "success": False,
-
-                "response":
-                publish_result
-            }
-
-        print("===================================")
-        print("INSTAGRAM POST SUCCESS")
-        print("===================================")
-
+    if "id" not in container_data:
         return {
-
-            "success": True,
-
-            "platform":
-            "instagram",
-
-            "response":
-            publish_result
-        }
-
-    except Exception as e:
-
-        print("INSTAGRAM POST ERROR:")
-        print(str(e))
-
-        return {
-
             "success": False,
-
-            "error": str(e)
+            "error": "Media container creation failed",
+            "details": container_data,
         }
+
+    creation_id = container_data["id"]
+
+    # ── Step 2: publish ───────────────────────────────
+    publish_resp = requests.post(
+        f"{GRAPH_URL}/{user_id}/media_publish",
+        data={
+            "creation_id": creation_id,
+            "access_token": access_token,
+        },
+        timeout=30,
+    )
+    publish_data = publish_resp.json()
+    print("PUBLISH RESPONSE:", publish_data)
+
+    if "id" not in publish_data:
+        return {
+            "success": False,
+            "error": "Media publish failed",
+            "details": publish_data,
+        }
+
+    return {
+        "success": True,
+        "platform": "instagram",
+        "post_id": publish_data["id"],
+    }

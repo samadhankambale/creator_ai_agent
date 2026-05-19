@@ -1,446 +1,151 @@
 from typing import Optional
-
-from fastapi import (
-    APIRouter,
-    Depends
-)
-
-from fastapi.responses import (
-    RedirectResponse,
-    HTMLResponse
-)
-
+from fastapi import APIRouter, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from app.database.dependencies import (
-    get_db
-)
-
+from app.core.config import settings
+from app.database.dependencies import get_db
 from app.integrations.linkedin.linkedin_client import (
     get_linkedin_auth_url,
     exchange_code_for_token,
-    get_linkedin_profile
+    get_linkedin_profile,
 )
+from app.integrations.whatsapp.whatsapp_client import send_message_sync, send_buttons_sync
+from app.services.social_account_service import social_account_service
 
-from app.integrations.whatsapp.whatsapp_client import (
-    send_message_sync,
-    send_buttons_sync
-)
-
-from app.services.social_account_service import (
-    social_account_service
-)
+router = APIRouter(prefix="/oauth/linkedin", tags=["LinkedIn OAuth"])
 
 
-router = APIRouter(
-    prefix="/oauth/linkedin",
-    tags=["LinkedIn OAuth"]
-)
-
-
-# =====================================================
-# CONNECT LINKEDIN
-# =====================================================
+# ──────────────────────────────────────────────────────────────
+# CONNECT
+# ──────────────────────────────────────────────────────────────
 
 @router.get("/connect")
-async def connect_linkedin(
-    whatsapp_number: str
-):
-
-    auth_url = (
-        get_linkedin_auth_url(
-            whatsapp_number
-        )
-    )
-
-    print("================================")
-    print("LINKEDIN AUTH URL")
-    print("================================")
-
-    print(auth_url)
-
-    return RedirectResponse(
-        url=auth_url
-    )
+async def connect_linkedin(whatsapp_number: str):
+    auth_url = get_linkedin_auth_url(whatsapp_number)
+    print("LINKEDIN AUTH URL:", auth_url)
+    return RedirectResponse(url=auth_url)
 
 
-# =====================================================
+# ──────────────────────────────────────────────────────────────
 # CALLBACK
-# =====================================================
+# ──────────────────────────────────────────────────────────────
 
 @router.get("/callback")
 async def linkedin_callback(
-
     code: Optional[str] = None,
-
     state: Optional[str] = None,
-
     error: Optional[str] = None,
-
     error_description: Optional[str] = None,
-
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
+    whatsapp_number = state
+
+    print("=" * 40)
+    print("LINKEDIN CALLBACK")
+    print("CODE:", code)
+    print("STATE / WHATSAPP:", whatsapp_number)
+    print("ERROR:", error)
+    print("=" * 40)
+
+    if error:
+        return HTMLResponse(
+            content=_html_page("LinkedIn Authorization Failed", f"{error}: {error_description}"),
+            status_code=400,
+        )
+
+    if not code:
+        return HTMLResponse(
+            content=_html_page("Authorization Failed", "No authorization code received."),
+            status_code=400,
+        )
+
+    if not whatsapp_number:
+        return HTMLResponse(
+            content=_html_page(
+                "Authorization Failed",
+                "Missing WhatsApp number. Please try connecting again from WhatsApp.",
+            ),
+            status_code=400,
+        )
 
     try:
+        # ── Exchange code for token ───────────────────
+        token_data = exchange_code_for_token(code)
+        print("LINKEDIN TOKEN DATA:", token_data)
 
-        print("================================")
-        print("LINKEDIN CALLBACK")
-        print("================================")
-
-        print("CODE:")
-        print(code)
-
-        print("STATE:")
-        print(state)
-
-        print("ERROR:")
-        print(error)
-
-        print("ERROR DESCRIPTION:")
-        print(error_description)
-
-        # =========================================
-        # LINKEDIN ERROR
-        # =========================================
-
-        if error:
-
-            return HTMLResponse(
-
-                content=f"""
-                <html>
-
-                    <body
-                        style="
-                            font-family: Arial;
-                            text-align: center;
-                            padding-top: 80px;
-                        "
-                    >
-
-                        <h2>
-                            LinkedIn Authorization Failed
-                        </h2>
-
-                        <p>
-                            {error}
-                        </p>
-
-                        <p>
-                            {error_description}
-                        </p>
-
-                    </body>
-
-                </html>
-                """,
-
-                status_code=400
-            )
-
-        # =========================================
-        # NO CODE
-        # =========================================
-
-        if not code:
-
-            return HTMLResponse(
-
-                content="""
-                <html>
-
-                    <body
-                        style="
-                            font-family: Arial;
-                            text-align: center;
-                            padding-top: 80px;
-                        "
-                    >
-
-                        <h2>
-                            No authorization code received
-                        </h2>
-
-                    </body>
-
-                </html>
-                """,
-
-                status_code=400
-            )
-
-        # =========================================
-        # EXCHANGE TOKEN
-        # =========================================
-
-        token_response = (
-            exchange_code_for_token(
-                code
-            )
-        )
-
-        print("================================")
-        print("TOKEN RESPONSE")
-        print("================================")
-
-        print(token_response)
-
-        access_token = (
-            token_response.get(
-                "access_token"
-            )
-        )
-
+        access_token = token_data.get("access_token")
         if not access_token:
-
             return HTMLResponse(
-
-                content=f"""
-                <html>
-
-                    <body
-                        style="
-                            font-family: Arial;
-                            text-align: center;
-                            padding-top: 80px;
-                        "
-                    >
-
-                        <h2>
-                            LinkedIn token exchange failed
-                        </h2>
-
-                        <pre>
-                        {token_response}
-                        </pre>
-
-                    </body>
-
-                </html>
-                """,
-
-                status_code=400
+                content=_html_page("Token Exchange Failed", str(token_data)),
+                status_code=400,
             )
 
-        # =========================================
-        # GET PROFILE
-        # =========================================
+        # ── Get profile via OpenID userinfo ───────────
+        # Requires openid + profile scopes
+        profile = get_linkedin_profile(access_token)
+        print("LINKEDIN PROFILE:", profile)
 
-        profile = (
-            get_linkedin_profile(
-                access_token
-            )
-        )
-
-        print("================================")
-        print("LINKEDIN PROFILE")
-        print("================================")
-
-        print(profile)
-
-        person_id = (
-            profile.get("id")
-        )
-
-        username = (
-            profile.get(
-                "localizedFirstName",
-                "LinkedIn"
-            )
-        )
-
-        print("================================")
-        print("LINKEDIN SAVE DEBUG")
-        print("================================")
-
-        print("PERSON ID:")
-        print(person_id)
-
-        print("USERNAME:")
-        print(username)
-
-        # =========================================
-        # INVALID PROFILE
-        # =========================================
+        # /userinfo returns 'sub' as the unique user ID
+        person_id = profile.get("sub")
+        username = profile.get("name") or profile.get("given_name", "LinkedIn User")
 
         if not person_id:
-
             return HTMLResponse(
-
-                content=f"""
-                <html>
-
-                    <body
-                        style="
-                            font-family: Arial;
-                            text-align: center;
-                            padding-top: 80px;
-                        "
-                    >
-
-                        <h2>
-                            Failed to fetch LinkedIn profile
-                        </h2>
-
-                        <pre>
-                        {profile}
-                        </pre>
-
-                    </body>
-
-                </html>
-                """,
-
-                status_code=400
+                content=_html_page(
+                    "Profile Fetch Failed",
+                    f"Could not get LinkedIn profile. Response: {profile}",
+                ),
+                status_code=400,
             )
 
-        # =========================================
-        # SAVE ACCOUNT
-        # =========================================
-
+        # ── Save to DB ────────────────────────────────
         social_account_service.connect_platform_account(
-
             db=db,
-
-            whatsapp_number=
-            state,
-
-            platform=
-            "linkedin",
-
-            access_token=
-            access_token,
-
-            platform_user_id=
-            person_id,
-
-            username=
-            username
+            whatsapp_number=whatsapp_number,
+            platform="linkedin",
+            access_token=access_token,
+            platform_user_id=person_id,
+            username=username,
         )
 
-        print("================================")
-        print("LINKEDIN CONNECTED SUCCESSFULLY")
-        print("================================")
+        print("LINKEDIN CONNECTED:", person_id, "for", whatsapp_number)
 
-        # =========================================
-        # SEND SUCCESS MESSAGE
-        # =========================================
-
-        send_message_sync(
-
-            state,
-
-            (
-                "✅ LinkedIn connected successfully."
-            )
-        )
-
-        # =========================================
-        # SEND NEW BUTTONS
-        # =========================================
-
+        # ── Notify user ───────────────────────────────
+        send_message_sync(whatsapp_number, "✅ LinkedIn connected successfully!")
         send_buttons_sync(
-
-            state,
-
+            whatsapp_number,
             "Choose action",
-
             [
-
-                {
-                    "id":
-                    "post_now",
-
-                    "title":
-                    "Post Now"
-                },
-
-                {
-                    "id":
-                    "schedule_post",
-
-                    "title":
-                    "Schedule"
-                }
-            ]
+                {"id": "post_now", "title": "Post Now"},
+                {"id": "schedule_post", "title": "Schedule"},
+            ],
         )
-
-        # =========================================
-        # SUCCESS PAGE
-        # =========================================
 
         return HTMLResponse(
-
-            content="""
-            <html>
-
-                <head>
-
-                    <title>
-                        LinkedIn Connected
-                    </title>
-
-                </head>
-
-                <body
-                    style="
-                        font-family: Arial;
-                        text-align: center;
-                        padding-top: 80px;
-                    "
-                >
-
-                    <h1>
-                        ✅ LinkedIn Connected Successfully
-                    </h1>
-
-                    <p>
-                        Return to WhatsApp
-                        and continue posting.
-                    </p>
-
-                </body>
-
-            </html>
-            """,
-
-            status_code=200
+            content=_html_page(
+                "✅ LinkedIn Connected!",
+                "You can close this tab and return to WhatsApp.",
+            ),
+            status_code=200,
         )
 
     except Exception as e:
-
-        print("================================")
-        print("LINKEDIN CALLBACK ERROR")
-        print("================================")
-
-        print(str(e))
-
+        import traceback
+        traceback.print_exc()
         return HTMLResponse(
-
-            content=f"""
-            <html>
-
-                <body
-                    style="
-                        font-family: Arial;
-                        text-align: center;
-                        padding-top: 80px;
-                    "
-                >
-
-                    <h2>
-                        LinkedIn connection failed
-                    </h2>
-
-                    <pre>
-                    {str(e)}
-                    </pre>
-
-                </body>
-
-            </html>
-            """,
-
-            status_code=500
+            content=_html_page("Connection Failed", str(e)),
+            status_code=500,
         )
+
+
+def _html_page(title: str, message: str) -> str:
+    return f"""
+    <html>
+      <head><title>{title}</title></head>
+      <body style="font-family:Arial;text-align:center;padding-top:80px;max-width:500px;margin:auto">
+        <h2>{title}</h2>
+        <p>{message}</p>
+      </body>
+    </html>
+    """

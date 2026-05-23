@@ -5,27 +5,29 @@ GRAPH_URL = "https://graph.facebook.com/v20.0"
 
 def post_to_instagram(
     access_token: str,
-    platform_user_id: str,   # matches publishing_service.publish() call
+    platform_user_id: str,
     image_url: str,
     caption: str,
-    ig_user_id: str = None,  # alias for backward compat
+    ig_user_id: str = None,
+    extra_image_urls: list = None,
 ) -> dict:
     """
-    Two-step Instagram publish:
-    1. Create media container
-    2. Publish the container
+    Single image or carousel post to Instagram.
+    If extra_image_urls provided → carousel post.
     """
 
-    # support both parameter names
     user_id = platform_user_id or ig_user_id
+    all_images = [image_url] + (extra_image_urls or [])
 
-    print("=" * 40)
-    print("INSTAGRAM: creating media container")
-    print("IG USER ID:", user_id)
-    print("IMAGE URL:", image_url)
-    print("=" * 40)
+    if len(all_images) > 1:
+        return _post_carousel(access_token, user_id, all_images, caption)
+    else:
+        return _post_single(access_token, user_id, image_url, caption)
 
-    # ── Step 1: create container ──────────────────────
+
+def _post_single(access_token: str, user_id: str, image_url: str, caption: str) -> dict:
+    print("INSTAGRAM: single image post")
+
     container_resp = requests.post(
         f"{GRAPH_URL}/{user_id}/media",
         data={
@@ -36,7 +38,7 @@ def post_to_instagram(
         timeout=30,
     )
     container_data = container_resp.json()
-    print("CONTAINER RESPONSE:", container_data)
+    print("INSTAGRAM CONTAINER:", container_data)
 
     if "id" not in container_data:
         return {
@@ -45,9 +47,64 @@ def post_to_instagram(
             "details": container_data,
         }
 
-    creation_id = container_data["id"]
+    return _publish(access_token, user_id, container_data["id"])
 
-    # ── Step 2: publish ───────────────────────────────
+
+def _post_carousel(
+    access_token: str,
+    user_id: str,
+    image_urls: list,
+    caption: str,
+) -> dict:
+    print(f"INSTAGRAM: carousel post with {len(image_urls)} images")
+
+    # Step 1: create child containers for each image
+    child_ids = []
+    for url in image_urls:
+        resp = requests.post(
+            f"{GRAPH_URL}/{user_id}/media",
+            data={
+                "image_url": url,
+                "is_carousel_item": "true",
+                "access_token": access_token,
+            },
+            timeout=30,
+        )
+        data = resp.json()
+        print("INSTAGRAM CHILD CONTAINER:", data)
+        if "id" not in data:
+            return {
+                "success": False,
+                "error": "Carousel child container failed",
+                "details": data,
+            }
+        child_ids.append(data["id"])
+
+    # Step 2: create carousel container
+    carousel_resp = requests.post(
+        f"{GRAPH_URL}/{user_id}/media",
+        data={
+            "media_type": "CAROUSEL",
+            "children": ",".join(child_ids),
+            "caption": caption,
+            "access_token": access_token,
+        },
+        timeout=30,
+    )
+    carousel_data = carousel_resp.json()
+    print("INSTAGRAM CAROUSEL CONTAINER:", carousel_data)
+
+    if "id" not in carousel_data:
+        return {
+            "success": False,
+            "error": "Carousel container creation failed",
+            "details": carousel_data,
+        }
+
+    return _publish(access_token, user_id, carousel_data["id"])
+
+
+def _publish(access_token: str, user_id: str, creation_id: str) -> dict:
     publish_resp = requests.post(
         f"{GRAPH_URL}/{user_id}/media_publish",
         data={
@@ -57,7 +114,7 @@ def post_to_instagram(
         timeout=30,
     )
     publish_data = publish_resp.json()
-    print("PUBLISH RESPONSE:", publish_data)
+    print("INSTAGRAM PUBLISH:", publish_data)
 
     if "id" not in publish_data:
         return {

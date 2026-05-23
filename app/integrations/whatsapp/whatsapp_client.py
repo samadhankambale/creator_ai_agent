@@ -1,333 +1,107 @@
+import httpx
 import requests
-
-from app.core.config import (
-    settings
-)
+from app.core.config import settings
 
 
-# =====================================================
-# WHATSAPP API URL
-# =====================================================
-
-WHATSAPP_API_URL = (
-
-    f"https://graph.facebook.com/v22.0/"
-    f"{settings.WHATSAPP_PHONE_NUMBER_ID}"
-    f"/messages"
-)
+def _base_url() -> str:
+    return (
+        f"https://graph.facebook.com/v20.0"
+        f"/{settings.WHATSAPP_PHONE_NUMBER_ID}/messages"
+    )
 
 
-# =====================================================
-# HEADERS
-# =====================================================
-
-HEADERS = {
-
-    "Authorization":
-    f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
-
-    "Content-Type":
-    "application/json"
-}
-
-
-# =====================================================
-# SEND MESSAGE
-# =====================================================
-
-async def send_message(
-    to,
-    text
-):
-
-    payload = {
-
-        "messaging_product":
-        "whatsapp",
-
-        "to":
-        to,
-
-        "type":
-        "text",
-
-        "text": {
-
-            "body":
-            text
-        }
+def _headers() -> dict:
+    """Read token fresh every call so token refresh works without restart."""
+    return {
+        "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
     }
 
-    response = requests.post(
 
-        WHATSAPP_API_URL,
+# ──────────────────────────────────────────────────────────────
+# ASYNC (FastAPI routes)
+# ──────────────────────────────────────────────────────────────
 
-        json=payload,
-
-        headers=HEADERS
-    )
-
-    response_json = (
-        response.json()
-    )
-
-    print("SEND MESSAGE RESPONSE:")
-    print(response_json)
-
-    return response_json
-
-
-# =====================================================
-# SEND MESSAGE SYNC
-# =====================================================
-
-def send_message_sync(
-    to,
-    text
-):
-
+async def send_message(to: str, text: str) -> dict:
     payload = {
-
-        "messaging_product":
-        "whatsapp",
-
-        "to":
-        to,
-
-        "type":
-        "text",
-
-        "text": {
-
-            "body":
-            text
-        }
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text},
     }
-
-    response = requests.post(
-
-        WHATSAPP_API_URL,
-
-        json=payload,
-
-        headers=HEADERS
-    )
-
-    response_json = (
-        response.json()
-    )
-
-    print("SYNC MESSAGE RESPONSE:")
-    print(response_json)
-
-    return response_json
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(_base_url(), headers=_headers(), json=payload)
+    print("WA send_message:", resp.status_code)
+    return resp.json()
 
 
-# =====================================================
-# SEND IMAGE
-# =====================================================
-
-async def send_image(
-    to,
-    image_url,
-    caption=None
-):
-
+async def send_buttons(to: str, body_text: str, buttons: list) -> dict:
     payload = {
-
-        "messaging_product":
-        "whatsapp",
-
-        "to":
-        to,
-
-        "type":
-        "image",
-
-        "image": {
-
-            "link":
-            image_url,
-
-            "caption":
-            caption or ""
-        }
-    }
-
-    response = requests.post(
-
-        WHATSAPP_API_URL,
-
-        json=payload,
-
-        headers=HEADERS
-    )
-
-    response_json = (
-        response.json()
-    )
-
-    print("SEND IMAGE RESPONSE:")
-    print(response_json)
-
-    return response_json
-
-
-# =====================================================
-# SEND BUTTONS
-# =====================================================
-
-async def send_buttons(
-    to,
-    body_text,
-    buttons
-):
-
-    button_components = []
-
-    for button in buttons:
-
-        button_components.append(
-
-            {
-                "type":
-                "reply",
-
-                "reply": {
-
-                    "id":
-                    button["id"],
-
-                    "title":
-                    button["title"]
-                }
-            }
-        )
-
-    payload = {
-
-        "messaging_product":
-        "whatsapp",
-
-        "to":
-        to,
-
-        "type":
-        "interactive",
-
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
         "interactive": {
-
-            "type":
-            "button",
-
-            "body": {
-
-                "text":
-                body_text
-            },
-
+            "type": "button",
+            "body": {"text": body_text},
             "action": {
-
-                "buttons":
-                button_components
-            }
-        }
+                "buttons": [
+                    {"type": "reply", "reply": {"id": b["id"], "title": b["title"]}}
+                    for b in buttons
+                ]
+            },
+        },
     }
-
-    response = requests.post(
-
-        WHATSAPP_API_URL,
-
-        json=payload,
-
-        headers=HEADERS
-    )
-
-    response_json = (
-        response.json()
-    )
-
-    print("BUTTON RESPONSE:")
-    print(response_json)
-
-    return response_json
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(_base_url(), headers=_headers(), json=payload)
+    print("WA send_buttons:", resp.status_code)
+    return resp.json()
 
 
-# =====================================================
-# SEND BUTTONS SYNC
-# =====================================================
-
-def send_buttons_sync(
-    to,
-    body_text,
-    buttons
-):
-
-    button_components = []
-
-    for button in buttons:
-
-        button_components.append(
-
-            {
-                "type":
-                "reply",
-
-                "reply": {
-
-                    "id":
-                    button["id"],
-
-                    "title":
-                    button["title"]
-                }
-            }
-        )
-
+async def send_image(to: str, image_url: str, caption: str) -> dict:
     payload = {
-
-        "messaging_product":
-        "whatsapp",
-
-        "to":
-        to,
-
-        "type":
-        "interactive",
-
-        "interactive": {
-
-            "type":
-            "button",
-
-            "body": {
-
-                "text":
-                body_text
-            },
-
-            "action": {
-
-                "buttons":
-                button_components
-            }
-        }
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "image",
+        "image": {"link": image_url, "caption": caption},
     }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(_base_url(), headers=_headers(), json=payload)
+    print("WA send_image:", resp.status_code)
+    return resp.json()
 
-    response = requests.post(
 
-        WHATSAPP_API_URL,
+# ──────────────────────────────────────────────────────────────
+# SYNC (Celery workers)
+# ──────────────────────────────────────────────────────────────
 
-        json=payload,
+def send_message_sync(to: str, text: str) -> dict:
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text},
+    }
+    resp = requests.post(_base_url(), headers=_headers(), json=payload, timeout=30)
+    print("WA send_message_sync:", resp.status_code)
+    return resp.json()
 
-        headers=HEADERS
-    )
 
-    response_json = (
-        response.json()
-    )
-
-    print("SYNC BUTTON RESPONSE:")
-    print(response_json)
-
-    return response_json
+def send_buttons_sync(to: str, body_text: str, buttons: list) -> dict:
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": body_text},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": b["id"], "title": b["title"]}}
+                    for b in buttons
+                ]
+            },
+        },
+    }
+    resp = requests.post(_base_url(), headers=_headers(), json=payload, timeout=30)
+    print("WA send_buttons_sync:", resp.status_code)
+    return resp.json()

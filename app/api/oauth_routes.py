@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 import requests as http_requests
+import redis
 
 from app.core.config import settings
 from app.database.dependencies import get_db
@@ -10,10 +11,20 @@ from app.integrations.meta.meta_client import (
     get_facebook_pages,
     get_instagram_business_account,
 )
+from app.integrations.twitter.twitter_client import (
+    get_twitter_auth_url,
+    exchange_code_for_token as twitter_exchange_code,
+    get_twitter_user,
+    generate_code_verifier,
+)
 from app.integrations.whatsapp.whatsapp_client import send_message_sync, send_buttons_sync
 from app.services.social_account_service import social_account_service
+from app.services.post_connect_service import on_platform_connected
 
-router = APIRouter(tags=["Meta OAuth"])
+router = APIRouter(tags=["OAuth"])
+
+# Redis for storing PKCE code_verifier temporarily
+redis_client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -34,7 +45,7 @@ async def connect_instagram(whatsapp_number: str):
 
 
 # ──────────────────────────────────────────────────────────────
-# THREADS CONNECT — uses THREADS_APP_ID (different from META)
+# THREADS CONNECT
 # ──────────────────────────────────────────────────────────────
 
 @router.get("/oauth/threads/connect")
@@ -49,6 +60,21 @@ async def connect_threads(whatsapp_number: str):
     )
     print("THREADS AUTH URL:", oauth_url)
     return RedirectResponse(url=oauth_url)
+
+
+# ──────────────────────────────────────────────────────────────
+# TWITTER CONNECT
+# ──────────────────────────────────────────────────────────────
+
+@router.get("/oauth/twitter/connect")
+async def connect_twitter(whatsapp_number: str):
+    # Generate PKCE verifier and store in Redis for 10 minutes
+    code_verifier = generate_code_verifier()
+    redis_client.setex(f"twitter_pkce:{whatsapp_number}", 600, code_verifier)
+
+    auth_url = get_twitter_auth_url(whatsapp_number, code_verifier)
+    print("TWITTER AUTH URL:", auth_url)
+    return RedirectResponse(url=auth_url)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -68,28 +94,15 @@ async def meta_callback(
 
     print("=" * 40)
     print("META CALLBACK")
-    print("CODE:", code)
     print("WHATSAPP NUMBER:", whatsapp_number)
     print("=" * 40)
 
     if error:
-        return HTMLResponse(
-            content=_html_page("Authorization Failed", error),
-            status_code=400,
-        )
+        return HTMLResponse(content=_html_page("Authorization Failed", error), status_code=400)
 
-    if not code:
+    if not code or not whatsapp_number:
         return HTMLResponse(
-            content=_html_page("Authorization Failed", "No authorization code received."),
-            status_code=400,
-        )
-
-    if not whatsapp_number:
-        return HTMLResponse(
-            content=_html_page(
-                "Authorization Failed",
-                "Missing WhatsApp number. Please try connecting again from WhatsApp.",
-            ),
+            content=_html_page("Authorization Failed", "Missing code or WhatsApp number."),
             status_code=400,
         )
 
@@ -144,33 +157,19 @@ async def meta_callback(
             username="instagram_user",
         )
 
-        print("INSTAGRAM CONNECTED:", ig_user_id, "for", whatsapp_number)
+        print("INSTAGRAM CONNECTED:", ig_user_id)
 
-        send_message_sync(whatsapp_number, "✅ Instagram connected successfully!")
-        send_buttons_sync(
-            whatsapp_number,
-            "Choose action",
-            [
-                {"id": "post_now", "title": "Post Now"},
-                {"id": "schedule_post", "title": "Schedule"},
-            ],
-        )
+        on_platform_connected(db=db, whatsapp_number=whatsapp_number, platform="instagram")
 
         return HTMLResponse(
-            content=_html_page(
-                "✅ Instagram Connected!",
-                "You can close this tab and return to WhatsApp.",
-            ),
+            content=_html_page("✅ Instagram Connected!", "You can close this tab and return to WhatsApp."),
             status_code=200,
         )
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return HTMLResponse(
-            content=_html_page("Connection Failed", str(e)),
-            status_code=500,
-        )
+        return HTMLResponse(content=_html_page("Connection Failed", str(e)), status_code=500)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -190,15 +189,11 @@ async def threads_callback(
 
     print("=" * 40)
     print("THREADS CALLBACK")
-    print("CODE:", code)
     print("WHATSAPP NUMBER:", whatsapp_number)
     print("=" * 40)
 
     if error:
-        return HTMLResponse(
-            content=_html_page("Authorization Failed", error),
-            status_code=400,
-        )
+        return HTMLResponse(content=_html_page("Authorization Failed", error), status_code=400)
 
     if not code or not whatsapp_number:
         return HTMLResponse(
@@ -207,7 +202,6 @@ async def threads_callback(
         )
 
     try:
-        # Exchange code using THREADS_APP_ID + THREADS_APP_SECRET
         token_resp = http_requests.post(
             "https://graph.threads.net/oauth/access_token",
             data={
@@ -240,33 +234,108 @@ async def threads_callback(
             username="threads_user",
         )
 
-        print("THREADS CONNECTED:", threads_user_id, "for", whatsapp_number)
+        print("THREADS CONNECTED:", threads_user_id)
 
-        send_message_sync(whatsapp_number, "✅ Threads connected successfully!")
-        send_buttons_sync(
-            whatsapp_number,
-            "Choose action",
-            [
-                {"id": "post_now", "title": "Post Now"},
-                {"id": "schedule_post", "title": "Schedule"},
-            ],
-        )
+        on_platform_connected(db=db, whatsapp_number=whatsapp_number, platform="threads")
 
         return HTMLResponse(
-            content=_html_page(
-                "✅ Threads Connected!",
-                "You can close this tab and return to WhatsApp.",
-            ),
+            content=_html_page("✅ Threads Connected!", "You can close this tab and return to WhatsApp."),
             status_code=200,
         )
 
     except Exception as e:
         import traceback
         traceback.print_exc()
+        return HTMLResponse(content=_html_page("Connection Failed", str(e)), status_code=500)
+
+
+# ──────────────────────────────────────────────────────────────
+# TWITTER CALLBACK
+# ──────────────────────────────────────────────────────────────
+
+@router.get("/oauth/twitter/callback")
+async def twitter_callback(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    code = request.query_params.get("code")
+    state = request.query_params.get("state", "")
+    error = request.query_params.get("error")
+
+    whatsapp_number = state if state else None
+
+    print("=" * 40)
+    print("TWITTER CALLBACK")
+    print("WHATSAPP NUMBER:", whatsapp_number)
+    print("=" * 40)
+
+    if error:
+        return HTMLResponse(content=_html_page("Authorization Failed", error), status_code=400)
+
+    if not code or not whatsapp_number:
         return HTMLResponse(
-            content=_html_page("Connection Failed", str(e)),
-            status_code=500,
+            content=_html_page("Authorization Failed", "Missing code or WhatsApp number."),
+            status_code=400,
         )
+
+    try:
+        # Retrieve PKCE verifier from Redis
+        code_verifier = redis_client.get(f"twitter_pkce:{whatsapp_number}")
+        if not code_verifier:
+            return HTMLResponse(
+                content=_html_page(
+                    "Session Expired",
+                    "OAuth session expired. Please try connecting again from WhatsApp.",
+                ),
+                status_code=400,
+            )
+
+        # Exchange code for token
+        token_data = twitter_exchange_code(code, code_verifier)
+        access_token = token_data.get("access_token")
+
+        if not access_token:
+            return HTMLResponse(
+                content=_html_page("Token Exchange Failed", str(token_data)),
+                status_code=400,
+            )
+
+        # Get Twitter user info
+        user_data = get_twitter_user(access_token)
+        twitter_user_id = user_data.get("data", {}).get("id", "")
+        username = user_data.get("data", {}).get("username", "twitter_user")
+
+        if not twitter_user_id:
+            return HTMLResponse(
+                content=_html_page("Profile Fetch Failed", str(user_data)),
+                status_code=400,
+            )
+
+        # Clean up PKCE verifier from Redis
+        redis_client.delete(f"twitter_pkce:{whatsapp_number}")
+
+        social_account_service.connect_platform_account(
+            db=db,
+            whatsapp_number=whatsapp_number,
+            platform="twitter",
+            access_token=access_token,
+            platform_user_id=twitter_user_id,
+            username=username,
+        )
+
+        print("TWITTER CONNECTED:", twitter_user_id, username)
+
+        on_platform_connected(db=db, whatsapp_number=whatsapp_number, platform="twitter")
+
+        return HTMLResponse(
+            content=_html_page("✅ Twitter Connected!", f"@{username} connected. You can close this tab and return to WhatsApp."),
+            status_code=200,
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return HTMLResponse(content=_html_page("Connection Failed", str(e)), status_code=500)
 
 
 def _html_page(title: str, message: str) -> str:

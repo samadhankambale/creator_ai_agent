@@ -12,6 +12,7 @@ from app.integrations.linkedin.linkedin_client import (
 )
 from app.integrations.whatsapp.whatsapp_client import send_message_sync, send_buttons_sync
 from app.services.social_account_service import social_account_service
+from app.services.post_connect_service import on_platform_connected
 
 router = APIRouter(prefix="/oauth/linkedin", tags=["LinkedIn OAuth"])
 
@@ -112,15 +113,7 @@ async def linkedin_callback(
         print("LINKEDIN CONNECTED:", person_id, "for", whatsapp_number)
 
         # ── Notify user ───────────────────────────────
-        send_message_sync(whatsapp_number, "✅ LinkedIn connected successfully!")
-        send_buttons_sync(
-            whatsapp_number,
-            "Choose action",
-            [
-                {"id": "post_now", "title": "Post Now"},
-                {"id": "schedule_post", "title": "Schedule"},
-            ],
-        )
+        on_platform_connected(db=db, whatsapp_number=whatsapp_number, platform="linkedin")
 
         return HTMLResponse(
             content=_html_page(

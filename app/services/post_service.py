@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from sqlalchemy.orm import Session
 
@@ -6,52 +7,71 @@ from app.repositories.post_repository import post_repository
 from app.repositories.publish_job_repository import publish_job_repository
 from app.repositories.social_account_repository import social_account_repository
 from app.integrations.groq.groq_client import generate_caption
-from app.integrations.pollinations.pollinations_client import generate_image
+from app.integrations.image_provider import generate_images
 
 
 class PostService:
 
-    # ── AI post generation ────────────────────────────
+    # ── Caption ───────────────────────────────────────
 
-    async def create_ai_post(
+    async def generate_caption_only(self, user_message: str) -> str:
+        topic = self._clean_topic(user_message)
+        return await generate_caption(topic)
+
+    def build_image_prompt(self, user_message: str) -> str:
+        topic = self._clean_topic(user_message)
+        return (
+            f"aesthetic social media background for: {topic}, "
+            "minimal, high quality, vibrant"
+        )
+
+    def _clean_topic(self, text: str) -> str:
+        cleaned = re.sub(
+            r"\b(generate|create|make|give me|show|produce)?\s*"
+            r"(\d+|one|two|three|four)\s*(image|images|img|photos?)?\b",
+            "", text, flags=re.IGNORECASE
+        ).strip(" ,.")
+        return cleaned if cleaned else text
+
+    # ── Image generation ──────────────────────────────
+
+    def generate_multiple_images(self, prompt: str, count: int) -> list:
+        return generate_images(prompt, count)
+
+    # ── Save post with all images ─────────────────────
+
+    def save_post_with_images(
         self,
         db: Session,
         whatsapp_number: str,
         user_message: str,
+        caption: str,
+        image_urls: list,
     ) -> dict:
-
-        print("=" * 40)
-        print("CREATING AI POST")
-        print("USER MESSAGE:", user_message)
-        print("=" * 40)
-
-        caption_prompt = (
-            f"Create a viral social media caption for this topic: {user_message}\n"
-            "Make it engaging, motivational, and include 3-5 hashtags."
-        )
-        image_prompt = (
-            f"aesthetic social media background for: {user_message}, "
-            "minimal, high quality, vibrant"
-        )
-
-        caption = await generate_caption(caption_prompt)
-        image_url = await generate_image(image_prompt)
-
-        print("IMAGE URL:", image_url)
-
+        """
+        Save post + all images to DB using post_images table.
+        Returns pending_post dict for session storage.
+        """
         user = user_repository.get_or_create(db, whatsapp_number)
+        primary = image_urls[0] if image_urls else ""
+        extras = image_urls[1:] if len(image_urls) > 1 else []
+
         post = post_repository.create(
             db=db,
             user_id=user.id,
             prompt=user_message,
             caption=caption,
-            image_url=image_url,
+            image_url=primary,
+            extra_image_urls=extras,
         )
+
+        print(f"POST SAVED: id={post.id} images={len(image_urls)}")
 
         return {
             "post_id": post.id,
             "caption": caption,
-            "image_url": image_url,
+            "image_url": primary,
+            "extra_image_urls": extras,
             "platforms": [],
         }
 
@@ -63,28 +83,15 @@ class PostService:
         whatsapp_number: str,
         platforms: list,
     ) -> list:
-
-        print("=" * 40)
-        print("CHECKING MISSING PLATFORMS")
-        print("WHATSAPP NUMBER:", whatsapp_number)
-        print("PLATFORMS:", platforms)
-        print("=" * 40)
-
         user = user_repository.get_by_whatsapp(db, whatsapp_number)
         if not user:
-            print("USER NOT FOUND — all platforms missing")
             return platforms
 
-        connected = []
-        missing = []
-        for platform in platforms:
-            account = social_account_repository.get(db, user.id, platform)
-            if account:
-                connected.append(platform)
-            else:
-                missing.append(platform)
-
-        print("CONNECTED PLATFORMS:", connected)
+        missing = [
+            p for p in platforms
+            if not social_account_repository.get(db, user.id, p)
+        ]
+        print("CONNECTED:", [p for p in platforms if p not in missing])
         print("MISSING:", missing)
         return missing
 
@@ -97,18 +104,12 @@ class PostService:
         pending_post: dict,
         platforms: list,
     ) -> list:
-
-        # Import here to avoid circular imports at module load time
         from app.workers.scheduled_post_worker import execute_publish_job
 
         user = user_repository.get_or_create(db, whatsapp_number)
         post_id = pending_post.get("post_id")
 
-        print("=" * 40)
-        print("CREATING IMMEDIATE JOBS")
-        print("POST ID:", post_id)
-        print("PLATFORMS:", platforms)
-        print("=" * 40)
+        print(f"DISPATCHING JOBS: post_id={post_id} platforms={platforms}")
 
         jobs = []
         for platform in platforms:
@@ -119,13 +120,8 @@ class PostService:
                 platform=platform,
                 scheduled_time=None,
             )
-
-            print(f"DISPATCHING JOB: job_id={job.id} platform={platform}")
-
-            # Use .delay() directly — most reliable way to dispatch on Windows
             execute_publish_job.delay(job.id)
-
-            print(f"JOB DISPATCHED: job_id={job.id}")
+            print(f"DISPATCHED job_id={job.id} platform={platform}")
             jobs.append(job)
 
         return jobs
@@ -140,18 +136,8 @@ class PostService:
         platforms: list,
         scheduled_time: datetime,
     ) -> list:
-
-        from app.workers.scheduled_post_worker import execute_publish_job
-
         user = user_repository.get_or_create(db, whatsapp_number)
         post_id = pending_post.get("post_id")
-
-        print("=" * 40)
-        print("CREATING SCHEDULED JOBS")
-        print("POST ID:", post_id)
-        print("PLATFORMS:", platforms)
-        print("SCHEDULED TIME:", scheduled_time)
-        print("=" * 40)
 
         jobs = []
         for platform in platforms:
@@ -162,7 +148,7 @@ class PostService:
                 platform=platform,
                 scheduled_time=scheduled_time,
             )
-            print(f"SCHEDULED JOB CREATED: job_id={job.id} platform={platform} at={scheduled_time}")
+            print(f"SCHEDULED job_id={job.id} platform={platform} at={scheduled_time}")
             jobs.append(job)
 
         return jobs

@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from app.models.social_account import SocialAccount
+from app.models.user_social_account import UserSocialAccount as SocialAccount
 from app.utils.encryption import encrypt_token, decrypt_token
 
 
@@ -21,7 +21,7 @@ class SocialAccountRepository:
             db.query(SocialAccount)
             .filter(
                 SocialAccount.user_id == user_id,
-                SocialAccount.platform == platform,
+                SocialAccount.platform_type == platform,
             )
             .first()
         )
@@ -74,7 +74,7 @@ class SocialAccountRepository:
             db.query(SocialAccount)
             .filter(
                 SocialAccount.user_id == user_id,
-                SocialAccount.platform == platform,
+                SocialAccount.platform_type == platform,
                 SocialAccount.is_active == True,
             )
             .first()

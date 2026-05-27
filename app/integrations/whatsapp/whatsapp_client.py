@@ -105,3 +105,27 @@ def send_buttons_sync(to: str, body_text: str, buttons: list) -> dict:
     resp = requests.post(_base_url(), headers=_headers(), json=payload, timeout=30)
     print("WA send_buttons_sync:", resp.status_code)
     return resp.json()
+
+
+async def send_list(to: str, body: str, button_label: str, sections: list) -> dict:
+    """
+    Send a WhatsApp List Message — scrollable menu, up to 10 options.
+    sections = [{"title": "Section", "rows": [{"id": "id", "title": "Title", "description": "optional"}]}]
+    """
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": body},
+            "action": {
+                "button": button_label,
+                "sections": sections,
+            },
+        },
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(_base_url(), headers=_headers(), json=payload)
+    print("WA send_list:", resp.status_code)
+    return resp.json()

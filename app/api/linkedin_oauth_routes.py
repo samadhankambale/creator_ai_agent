@@ -101,9 +101,11 @@ async def linkedin_callback(
             )
 
         # ── Save to DB ────────────────────────────────
-        social_account_service.connect_platform_account(
+        from app.services.user_service import user_service
+        user = user_service.get_or_create(db, whatsapp_number)
+        social_account_service.upsert(
             db=db,
-            whatsapp_number=whatsapp_number,
+            user_id=user.id,
             platform="linkedin",
             access_token=access_token,
             platform_user_id=person_id,

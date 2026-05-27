@@ -3,8 +3,10 @@ from app.integrations.linkedin.linkedin_client import post_to_linkedin
 from app.integrations.threads.threads_client import post_to_threads
 from app.integrations.twitter.twitter_client import post_to_twitter
 
-# Platforms that support carousel/multiple images
 CAROUSEL_SUPPORTED = ["instagram", "linkedin", "threads"]
+VIDEO_SUPPORTED = ["instagram", "linkedin", "threads"]
+REELS_SUPPORTED = ["instagram"]
+STORIES_SUPPORTED = ["instagram"]
 
 
 class PublishingService:
@@ -17,19 +19,45 @@ class PublishingService:
         caption: str,
         image_url: str,
         extra_image_urls: list = None,
+        video_url: str = None,
+        post_type: str = "post",  # post | reel | story
     ) -> dict:
-
-        has_multiple = extra_image_urls and len(extra_image_urls) > 0
-        total_images = 1 + len(extra_image_urls or [])
 
         print("=" * 40)
         print(f"PUBLISHING TO: {platform}")
-        print(f"IMAGES: {total_images}")
+        print(f"POST TYPE: {post_type}")
+        print(f"IMAGES: {1 + len(extra_image_urls or [])}")
+        print(f"VIDEO: {bool(video_url)}")
         print(f"PLATFORM USER ID: {platform_user_id}")
         print("=" * 40)
 
-        # Warn if platform doesn't support carousel
-        if has_multiple and platform not in CAROUSEL_SUPPORTED:
+        # Reel — Instagram only
+        if post_type == "reel" and platform not in REELS_SUPPORTED:
+            return {
+                "success": False,
+                "error": f"{platform.title()} doesn't support Reels",
+                "details": f"Reels only supported on Instagram",
+            }
+
+        # Story — Instagram only
+        if post_type == "story" and platform not in STORIES_SUPPORTED:
+            return {
+                "success": False,
+                "error": f"{platform.title()} doesn't support Stories",
+                "details": f"Stories only supported on Instagram",
+            }
+
+        # LinkedIn video not supported
+        if video_url and platform == "linkedin":
+            return {
+                "success": False,
+                "error": "LinkedIn video not supported",
+                "details": "LinkedIn video upload requires chunked upload API — not implemented yet.",
+                "skip_reconnect": True,
+            }
+
+        # Carousel not supported
+        if extra_image_urls and platform not in CAROUSEL_SUPPORTED:
             print(f"{platform}: carousel not supported, posting first image only")
 
         if platform == "instagram":
@@ -39,6 +67,8 @@ class PublishingService:
                 image_url=image_url,
                 caption=caption,
                 extra_image_urls=extra_image_urls if platform in CAROUSEL_SUPPORTED else None,
+                post_type=post_type,
+                video_url=video_url,
             )
 
         elif platform == "linkedin":
@@ -57,10 +87,10 @@ class PublishingService:
                 caption=caption,
                 image_url=image_url,
                 extra_image_urls=extra_image_urls if platform in CAROUSEL_SUPPORTED else None,
+                video_url=video_url,
             )
 
         elif platform == "twitter":
-            # Twitter: single image only
             return post_to_twitter(
                 access_token=access_token,
                 twitter_user_id=platform_user_id,
@@ -68,10 +98,7 @@ class PublishingService:
                 image_url=image_url,
             )
 
-        return {
-            "success": False,
-            "error": f"Platform '{platform}' not supported",
-        }
+        return {"success": False, "error": f"Platform '{platform}' not supported"}
 
 
 publishing_service = PublishingService()

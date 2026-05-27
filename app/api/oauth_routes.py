@@ -148,13 +148,15 @@ async def meta_callback(
                 status_code=400,
             )
 
-        social_account_service.connect_platform_account(
+        from app.services.user_service import user_service
+        user = user_service.get_or_create(db, whatsapp_number)
+        social_account_service.upsert(
             db=db,
-            whatsapp_number=whatsapp_number,
+            user_id=user.id,
             platform="instagram",
             access_token=page_access_token,
             platform_user_id=ig_user_id,
-            username="instagram_user",
+            username=ig_user_id,
         )
 
         print("INSTAGRAM CONNECTED:", ig_user_id)
@@ -225,13 +227,15 @@ async def threads_callback(
                 status_code=400,
             )
 
-        social_account_service.connect_platform_account(
+        from app.services.user_service import user_service
+        user = user_service.get_or_create(db, whatsapp_number)
+        social_account_service.upsert(
             db=db,
-            whatsapp_number=whatsapp_number,
+            user_id=user.id,
             platform="threads",
             access_token=access_token,
             platform_user_id=threads_user_id,
-            username="threads_user",
+            username=threads_user_id,
         )
 
         print("THREADS CONNECTED:", threads_user_id)
@@ -314,9 +318,11 @@ async def twitter_callback(
         # Clean up PKCE verifier from Redis
         redis_client.delete(f"twitter_pkce:{whatsapp_number}")
 
-        social_account_service.connect_platform_account(
+        from app.services.user_service import user_service
+        user = user_service.get_or_create(db, whatsapp_number)
+        social_account_service.upsert(
             db=db,
-            whatsapp_number=whatsapp_number,
+            user_id=user.id,
             platform="twitter",
             access_token=access_token,
             platform_user_id=twitter_user_id,

@@ -1,84 +1,107 @@
 """
 Called after any platform OAuth connect completes.
-Checks if all user's selected platforms are now connected
-and sends the appropriate WhatsApp message.
+Sends ONE clean message — not multiple separate messages.
+Only checks platforms user actually selected.
 """
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.integrations.whatsapp.whatsapp_client import send_message_sync, send_buttons_sync
-from app.services.session_service import session_service
 from app.services.social_account_service import social_account_service
+from app.services.user_service import user_service
 
 
-def on_platform_connected(
-    db: Session,
-    whatsapp_number: str,
-    platform: str,
-):
-    """
-    Called right after a platform is connected via OAuth.
-    - If all selected platforms are now connected → show Post Now / Schedule
-    - If some still missing → show remaining connect links
-    - If no pending post → just confirm connection
-    """
+def _connect_url(base: str, platform: str, whatsapp_number: str) -> str:
+    urls = {
+        "instagram": f"{base}/oauth/meta/connect?whatsapp_number={whatsapp_number}",
+        "linkedin":  f"{base}/oauth/linkedin/connect?whatsapp_number={whatsapp_number}",
+        "threads":   f"{base}/oauth/threads/connect?whatsapp_number={whatsapp_number}",
+        "twitter":   f"{base}/oauth/twitter/connect?whatsapp_number={whatsapp_number}",
+    }
+    return urls.get(platform, "")
 
-    # Get what platforms the user had selected for their pending post
-    selected = session_service.get_selected_platforms(whatsapp_number)
-    pending = session_service.get_pending_post(whatsapp_number)
 
-    print(f"ON CONNECT: {platform} connected | selected={selected} | pending={bool(pending)}")
-
-    # No pending post — just confirm
-    if not pending or not selected:
-        send_message_sync(
-            whatsapp_number,
-            f"✅ {platform.title()} connected successfully!"
-        )
+def on_platform_connected(db: Session, whatsapp_number: str, platform: str):
+    user = user_service.get_by_number(db, whatsapp_number)
+    if not user:
+        send_message_sync(whatsapp_number, f"✅ {platform.title()} connected!")
         return
 
-    # Check which selected platforms are still missing
-    still_missing = social_account_service.get_missing_platforms(
-        db=db,
-        whatsapp_number=whatsapp_number,
-        platforms=selected,
+    # Find most recent active/failed draft within 2 hours
+    from app.models.draft import Draft
+    cutoff = datetime.utcnow() - timedelta(hours=2)
+    draft = (
+        db.query(Draft)
+        .filter(
+            Draft.user_id == user.id,
+            Draft.draft_status.in_(["active", "failed"]),
+            Draft.updated_at >= cutoff,
+        )
+        .order_by(Draft.updated_at.desc())
+        .first()
     )
-    # Remove the one just connected (in case DB not refreshed yet)
-    still_missing = [p for p in still_missing if p != platform]
+
+    if not draft:
+        send_message_sync(whatsapp_number, f"✅ {platform.title()} connected!")
+        return
+
+    db.refresh(draft)
+    selected = (draft.extracted_data or {}).get("platforms") or []
+    print(f"POST_CONNECT: platform={platform} selected={selected}")
+
+    if not selected:
+        send_message_sync(whatsapp_number, f"✅ {platform.title()} connected!")
+        return
+
+    # Force fresh DB read before checking
+    db.expire_all()
+
+    # Check which selected platforms are still missing (excluding just-connected one)
+    still_missing = []
+    for p in selected:
+        if p == platform:
+            continue  # just connected this one
+        account = social_account_service.get(db, user.id, p)
+        if not account:
+            still_missing.append(p)
+            print(f"POST_CONNECT: {p} NOT connected")
+        else:
+            print(f"POST_CONNECT: {p} is connected")
+
+    print(f"POST_CONNECT: still_missing={still_missing}")
+
+    from app.core.config import settings
+    base = settings.APP_BASE_URL
 
     if still_missing:
-        # Still some platforms to connect
-        from app.core.config import settings
-        base = settings.APP_BASE_URL
-
-        connect_urls = {
-            "instagram": f"{base}/oauth/meta/connect?whatsapp_number={whatsapp_number}",
-            "linkedin":  f"{base}/oauth/linkedin/connect?whatsapp_number={whatsapp_number}",
-            "threads":   f"{base}/oauth/threads/connect?whatsapp_number={whatsapp_number}",
-            "twitter":   f"{base}/oauth/twitter/connect?whatsapp_number={whatsapp_number}",
-        }
-
+        # ONE message with all remaining links
         missing_str = " + ".join(p.title() for p in still_missing)
+        links = "\n".join(
+            f"🔗 {p.title()}: {_connect_url(base, p, whatsapp_number)}"
+            for p in still_missing
+        )
         send_message_sync(
             whatsapp_number,
             f"✅ {platform.title()} connected!\n\n"
-            f"Still need to connect: *{missing_str}*"
+            f"Still need to connect: *{missing_str}*\n\n"
+            f"{links}"
         )
-        for p in still_missing:
-            if p in connect_urls:
-                send_message_sync(
-                    whatsapp_number,
-                    f"🔗 Connect {p.title()}:\n{connect_urls[p]}"
-                )
     else:
-        # All platforms connected — show Post Now / Schedule
+        # All connected — reactivate draft and show Post Now / Schedule
+        if draft.draft_status == "failed":
+            draft.draft_status = "active"
+            draft.current_step = "ready_to_post"
+            db.commit()
+
         platforms_str = " + ".join(p.title() for p in selected)
         send_message_sync(
             whatsapp_number,
             f"✅ {platform.title()} connected!\n\n"
-            f"All platforms ready: *{platforms_str}*"
+            f"All platforms ready: *{platforms_str}*\n\n"
+            "Your draft is saved — ready to publish! 🎉"
         )
         send_buttons_sync(
             whatsapp_number,
-            f"Ready to post on {platforms_str}:",
+            "What would you like to do?",
             [
                 {"id": "post_now",      "title": "🚀 Post Now"},
                 {"id": "schedule_post", "title": "🕐 Schedule"},

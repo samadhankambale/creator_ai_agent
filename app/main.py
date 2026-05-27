@@ -13,4 +13,4 @@ async def root():
 
 app.include_router(webhook_router)
 app.include_router(linkedin_router)
-app.include_router(meta_router)   # handles /oauth/meta/* and /oauth/threads/*
+app.include_router(meta_router)   

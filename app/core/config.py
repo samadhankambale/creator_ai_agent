@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str
     GEMINI_API_KEY: str = ""
     IMGBB_API_KEY: str = ""
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
     IMAGE_PROVIDER: str = "pollinations"  # pollinations | gemini
 
     WHATSAPP_ACCESS_TOKEN: str

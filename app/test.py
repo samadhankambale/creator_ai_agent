@@ -1,4 +1,3 @@
-
 import requests
 key = 'AIzaSyB567y0_g-9jzfE-Z8dfv2acBh5eQ3c5JM'
 r = requests.get(f'https://generativelanguage.googleapis.com/v1beta/models?key={key}')

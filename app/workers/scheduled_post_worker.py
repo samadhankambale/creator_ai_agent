@@ -77,7 +77,7 @@ def _friendly_error(platform: str, details) -> str:
     # Twitter
     if platform == "twitter":
         if "creditsdepleted" in dl or "credits" in dl:
-            return "Twitter posting is temporarily unavailable. Please try again later."
+            return "Twitter requires a paid Basic plan ($100/mo) to post. Cannot post on Twitter."
         if "401" in details_str or "unauthorized" in dl or "unsupported authentication" in dl:
             return "Twitter session expired. Please reconnect your Twitter account."
 
@@ -104,58 +104,96 @@ def _check_and_send_summary(db, draft_id, whatsapp_number: str):
     all_jobs = (
         db.query(PublishJob)
         .filter(PublishJob.draft_id == draft_id)
+        .order_by(PublishJob.created_at.desc())
         .all()
     )
 
     if not all_jobs:
         return
 
-    # Check if any jobs are still pending
-    pending = [j for j in all_jobs if j.status == "pending"]
+    # Only consider the most recent job per platform
+    seen_platforms = set()
+    latest_jobs = []
+    for j in all_jobs:
+        if j.platform not in seen_platforms:
+            seen_platforms.add(j.platform)
+            latest_jobs.append(j)
+    all_jobs = latest_jobs
+
+    # Check if any jobs are still actively running (not waiting for connection)
+    pending = [
+        j for j in all_jobs
+        if j.status == "pending"
+        and "not connected" not in (j.error_message or "")
+    ]
     if pending:
-        print(f"SUMMARY: {len(pending)} jobs still pending, waiting...")
+        print(f"SUMMARY: {len(pending)} jobs still running — waiting for them to finish")
         return
 
-    # All jobs done — build summary
+    # Re-query with latest-per-platform filter for final counts
+    import time
+    time.sleep(1)
+    db.expire_all()
+    all_jobs_recheck = (
+        db.query(PublishJob)
+        .filter(PublishJob.draft_id == draft_id)
+        .order_by(PublishJob.created_at.desc())
+        .all()
+    )
+    # Latest job per platform only
+    seen = set()
+    latest = []
+    for j in all_jobs_recheck:
+        if j.platform not in seen:
+            seen.add(j.platform)
+            latest.append(j)
+    all_jobs = latest
+
+    pending = [j for j in all_jobs if j.status == "pending"]
+    if pending:
+        print(f"SUMMARY: still {len(pending)} pending after recheck — skipping")
+        return
+
+    # All jobs done — build summary (exclude awaiting_connection)
     succeeded = [j for j in all_jobs if j.status == "done"]
     failed = [j for j in all_jobs if j.status == "failed"]
+    # Skip awaiting_connection in summary — they will be dispatched after connect
 
     print(f"SUMMARY: {len(succeeded)} succeeded, {len(failed)} failed")
 
-    # Build clean summary
+    # Build clean per-platform summary
+    lines = []
+
+    for j in succeeded:
+        lines.append(f"✅ {j.platform.title()} — posted successfully!")
+
+    for j in failed:
+        err = j.error_message or ""
+        friendly = _friendly_error(j.platform, err)
+        if _is_auth_error(err):
+            url = _get_connect_url(whatsapp_number, j.platform)
+            lines.append(f"❌ {j.platform.title()} — {friendly}")
+            if url:
+                lines.append(f"   🔗 Reconnect: {url}")
+        else:
+            lines.append(f"❌ {j.platform.title()} — {friendly}")
+
     if succeeded and not failed:
-        platforms_str = " + ".join(j.platform.title() for j in succeeded)
-        message = f"🎉 Posted on {platforms_str}!\n\nWhat would you like to do next? Send me a new topic to create another post."
+        lines.append("")
+        lines.append("What would you like to do next? Send me a new topic to create another post.")
+    elif failed:
+        lines.append("")
+        lines.append("Send *retry* to retry failed platforms.")
 
-    elif succeeded and failed:
-        success_str = " + ".join(j.platform.title() for j in succeeded)
-        fail_str = " + ".join(j.platform.title() for j in failed)
-        # Add reconnect links for auth errors
-        reconnect_lines = []
-        for j in failed:
-            if _is_auth_error(j.error_message or ""):
-                url = _get_connect_url(whatsapp_number, j.platform)
-                if url:
-                    reconnect_lines.append(f"🔗 {j.platform.title()}: {url}")
-        reconnect = ("\n" + "\n".join(reconnect_lines)) if reconnect_lines else ""
-        message = (
-            f"✅ {success_str} — posted\n"
-            f"❌ {fail_str} — failed{reconnect}\n\n"
-            f"Send *retry* to retry."
-        )
+    message = "\n".join(lines)
 
+    result = send_message_sync(whatsapp_number, message)
+    if result == 401:
+        print(f"SUMMARY: WhatsApp token expired — message not delivered. Refresh token in .env")
+    elif result == 200:
+        print(f"SUMMARY: Message delivered successfully")
     else:
-        # All failed
-        reconnect_lines = []
-        for j in failed:
-            if _is_auth_error(j.error_message or ""):
-                url = _get_connect_url(whatsapp_number, j.platform)
-                if url:
-                    reconnect_lines.append(f"🔗 {j.platform.title()}: {url}")
-        reconnect = ("\n" + "\n".join(reconnect_lines)) if reconnect_lines else ""
-        message = f"❌ Could not post.{reconnect}\n\nSend *retry* to try again."
-
-    send_message_sync(whatsapp_number, message)
+        print(f"SUMMARY: WA send status={result}")
 
 
 
@@ -197,8 +235,9 @@ def execute_publish_job(job_id: str):
             print(f"TOKEN LENGTH: {len(account.access_token) if account.access_token else 0}")
             print(f"TOKEN PREFIX: {account.access_token[:20] if account.access_token else 'NONE'}")
         if not account:
-            job.status = "failed"
-            job.error_message = f"{job.platform} not connected"
+            # Mark as awaiting_connection — beat will skip this, post_connect_service will dispatch
+            job.status = "awaiting_connection"
+            job.error_message = f"{job.platform} not connected — waiting for user to connect"
             db.commit()
             if user:
                 connect_url = _get_connect_url(user.number, job.platform)
@@ -253,15 +292,17 @@ def execute_publish_job(job_id: str):
 
         video_url = None
         image_urls = []
+        print(f"URL LIST: {url_list}")
         for url in url_list:
             if url and any(x in url.lower() for x in [
                 ".mp4", ".mov", ".avi", ".webm",
-                "/video/upload/",   # Cloudinary video URL
-                "video_url",        # explicit video marker
+                "/video/upload/",
             ]):
                 video_url = url
+                print(f"DETECTED VIDEO URL: {url}")
             else:
                 image_urls.append(url)
+                print(f"DETECTED IMAGE URL: {url}")
 
         primary_image = image_urls[0] if image_urls else (url_list[0] if url_list else "")
         extra_images = image_urls[1:] if len(image_urls) > 1 else []
@@ -367,7 +408,7 @@ def run_scheduled_jobs():
         stale = (
             db.query(PublishJob)
             .filter(
-                PublishJob.status == "pending",
+                PublishJob.status.in_(["pending", "awaiting_connection"]),
                 PublishJob.scheduled_time != None,
                 PublishJob.scheduled_time < stale_cutoff,
             )
@@ -383,7 +424,7 @@ def run_scheduled_jobs():
         due_jobs = (
             db.query(PublishJob)
             .filter(
-                PublishJob.status == "pending",
+                PublishJob.status == "pending",  # only pending, not awaiting_connection
                 PublishJob.scheduled_time <= now,
                 PublishJob.scheduled_time != None,
             )

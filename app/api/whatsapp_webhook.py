@@ -132,6 +132,26 @@ async def receive_message(
 # TEXT HANDLER
 # ──────────────────────────────────────────────────────────────
 
+async def _get_greeting_reply(text: str) -> str:
+    """Return a short contextual greeting reply."""
+    t = text.lower()
+    if any(x in t for x in ["good night", "gn", "goodnight"]):
+        return "Good night! 🌙 See you tomorrow!"
+    if any(x in t for x in ["good morning", "gm", "goodmorning"]):
+        return "Good morning! ☀️ Send me a topic to post!"
+    if any(x in t for x in ["good evening", "good afternoon"]):
+        return "Good evening! 👋 Send me a topic to post!"
+    if any(x in t for x in ["how are you", "how r u", "how are u", "hows you"]):
+        return "Doing great! 😊 Send me a topic to create a post!"
+    if any(x in t for x in ["namaste", "namaskar"]):
+        return "Namaste! 🙏 Send me a topic to post!"
+    if any(x in t for x in ["wassup", "whatsup", "sup", "yo"]):
+        return "Hey! 👋 Send me a topic to create a post!"
+    return "Hi! 👋 Send me a topic to create a post!"
+
+
+
+
 async def _handle_text(phone: str, text: str, user, db: Session) -> dict:
     text_lower = text.lower().strip()
 
@@ -148,199 +168,19 @@ async def _handle_text(phone: str, text: str, user, db: Session) -> dict:
         await send_message(phone, BOT_CAPABILITIES)
         return {"success": True}
 
-
-    if any(kw in text_lower for kw in DISCARD_KEYWORDS) and active_draft:
-        return await _show_discard_confirmation(phone, active_draft, db)
-
-    # ── Steps that expect raw text input — bypass intent detection ──
-    TEXT_INPUT_STEPS = ("schedule_input", "caption_edit", "collecting_missing")
-    if active_draft and active_draft.current_step in TEXT_INPUT_STEPS:
-        return await _handle_draft_step(phone, text, active_draft, user, db)
-
-    # ── Always run intent detection first ────────────────
-    intent_data = await detect_intent(text)
-    intent = intent_data.get("intent", "unknown")
-    print(f"INTENT: {intent} | confidence={intent_data.get('confidence', 0)}")
-
-    # ── Handle off-topic and questions immediately ────────
-    if intent == "off_topic":
-        await send_message(phone, get_off_topic_response())
-        return {"success": True}
-
-    if intent == "question":
-        answer = intent_data.get("answer") or BOT_CAPABILITIES
-        await send_message(phone, answer)
-        return {"success": True}
-
-    if intent == "greeting":
-        if active_draft:
+    # Fast-path greetings — skip Groq call
+    GREETING_WORDS = {
+        "hi", "hello", "hey", "helo", "hii", "hiii", "heya", "hiya",
+        "gm", "gn", "good morning", "good night", "good evening",
+        "good afternoon", "goodmorning", "goodnight",
+        "sup", "wassup", "whatsup", "yo", "namaste", "namaskar",
+        "hlo", "hlw", "hellooo", "hiiii", "heyy", "heyyy",
+    }
+    if text_lower in GREETING_WORDS or (len(text_lower) <= 10 and text_lower.replace("i","").replace("h","").replace("e","").replace("y","") == ""):
+        if active_draft and active_draft.current_step not in ("done", "completed"):
             return await _show_resume_prompt(phone, active_draft, db)
-        await send_message(phone, "Hi! Send me a topic to create a post. Type *help* to see all features.")
-        return {"success": True}
-
-    if intent == "generate_image":
-        subject = intent_data.get("image_subject") or text
-        return await _handle_generate_image_request(phone, subject, user, db)
-
-    if intent == "post_history":
-        return await _handle_post_history(phone, user, db)
-
-    if intent == "cancel_schedule":
-        return await _handle_cancel_schedule(phone, user, db)
-
-    if intent == "retry" and active_draft:
-        await send_message(phone, "🔄 Retrying your post...")
-        return await _check_connections_and_proceed(phone, active_draft, user, db)
-
-    if intent == "resume" and active_draft:
-        return await _show_resume_prompt(phone, active_draft, db)
-
-    if intent == "discard" and active_draft:
-        return await _show_discard_confirmation(phone, active_draft, db)
-
-    if active_draft and active_draft.current_step not in ("done", "publishing", "ready_to_post"):
-        if intent in ("create_post", "unknown"):
-            return await _handle_draft_step(phone, text, active_draft, user, db)
-
-    if intent in ("create_post", "unknown"):
-        if active_draft and active_draft.current_step == "ready_to_post":
-            return await _show_resume_prompt(phone, active_draft, db)
-        return await _start_new_post(phone, text, user, db)
-
-    return await _start_new_post(phone, text, user, db)
-import asyncio
-import traceback
-import httpx
-import re
-from fastapi import APIRouter, Depends, Request
-from sqlalchemy.orm import Session
-
-from app.database.dependencies import get_db
-from app.core.config import settings
-from app.integrations.whatsapp.whatsapp_client import send_message, send_buttons, send_image, send_list
-from app.services.draft_service import draft_service
-from app.services.intent_service import detect_intent, BOT_CAPABILITIES, get_off_topic_response
-from app.services.entity_extraction_service import (
-    extract_entities, get_missing_fields, build_missing_fields_message
-)
-from app.services.user_service import user_service
-from app.services.post_service import post_service
-from app.services.scheduler_service import scheduler_service
-from app.integrations.image_provider import generate_images
-from app.integrations.groq.groq_client import generate_caption
-
-router = APIRouter(tags=["WhatsApp Webhook"])
-webhook_lock = asyncio.Lock()
-
-ALL_PLATFORMS = ["instagram", "linkedin", "threads", "twitter"]
-MAX_IMAGES = 5
-
-# ── Discard keywords ──────────────────────────────────────────
-DISCARD_KEYWORDS = [
-    "cancel", "discard", "delete draft", "start over",
-    "stop", "stop this", "abort", "reset", "new post"
-]
-
-
-# ──────────────────────────────────────────────────────────────
-# VERIFY
-# ──────────────────────────────────────────────────────────────
-
-@router.get("/webhook")
-async def verify_webhook(request: Request):
-    params = request.query_params
-    if (params.get("hub.mode") == "subscribe"
-            and params.get("hub.verify_token") == settings.WHATSAPP_VERIFY_TOKEN):
-        return int(params.get("hub.challenge"))
-    return {"error": "Verification failed"}
-
-
-# ──────────────────────────────────────────────────────────────
-# RECEIVE MESSAGE
-# ──────────────────────────────────────────────────────────────
-
-@router.post("/webhook")
-async def receive_message(
-    payload: dict,
-    db: Session = Depends(get_db),
-):
-    async with webhook_lock:
-        try:
-            entry = payload.get("entry", [])
-            if not entry:
-                return {"success": True}
-            value = entry[0].get("changes", [{}])[0].get("value", {})
-            if "messages" not in value:
-                return {"success": True}
-
-            message = value["messages"][0]
-            contacts = value.get("contacts", [])
-            if not contacts:
-                return {"success": True}
-
-            phone = contacts[0].get("wa_id")
-            msg_type = message.get("type")
-            msg_id = message.get("id", "")
-
-            # ── Deduplication — skip already-processed messages ──
-            import redis as redis_lib
-            from app.core.config import settings as _settings
-            try:
-                _redis = redis_lib.from_url(_settings.REDIS_URL)
-                dedup_key = f"wa_msg:{msg_id}"
-                if _redis.get(dedup_key):
-                    print(f"DUPLICATE MESSAGE SKIPPED: {msg_id}")
-                    return {"success": True}
-                _redis.setex(dedup_key, 300, "1")  # expire after 5 min
-            except Exception as _e:
-                print(f"DEDUP REDIS ERROR: {_e}")
-
-            print(f"\n{'='*40}\nFROM: {phone} | TYPE: {msg_type}\n{'='*40}")
-
-            user = user_service.get_or_create(db, phone)
-
-            if msg_type == "image":
-                return await _handle_user_image(phone, message, user, db)
-            if msg_type == "video":
-                return await _handle_user_video(phone, message, user, db)
-            if msg_type == "interactive":
-                # Handle both button_reply and list_reply
-                interactive = message.get("interactive", {})
-                if interactive.get("type") == "list_reply":
-                    # Treat list reply same as button reply
-                    list_id = interactive.get("list_reply", {}).get("id", "")
-                    message["interactive"]["button_reply"] = {"id": list_id, "title": ""}
-                return await _handle_button(phone, message, user, db)
-            if msg_type == "text":
-                text = message["text"].get("body", "").strip()
-                return await _handle_text(phone, text, user, db)
-
-            return {"success": True}
-
-        except Exception as e:
-            print("WEBHOOK ERROR:", e)
-            traceback.print_exc()
-            return {"success": False}
-
-
-# ──────────────────────────────────────────────────────────────
-# TEXT HANDLER
-# ──────────────────────────────────────────────────────────────
-
-async def _handle_text(phone: str, text: str, user, db: Session) -> dict:
-    text_lower = text.lower().strip()
-
-    # ── Check active draft ────────────────────────────
-    active_draft = draft_service.get_active_draft(db, str(user.id))
-
-    # ── Hard-coded fast commands (no AI needed) ───────
-    if text_lower in ("retry", "try again", "post again") and active_draft:
-        if active_draft.current_step == "ready_to_post":
-            await send_message(phone, "🔄 Retrying your post...")
-            return await _check_connections_and_proceed(phone, active_draft, user, db)
-
-    if text_lower in ("help", "/help"):
-        await send_message(phone, BOT_CAPABILITIES)
+        reply = await _get_greeting_reply(text)
+        await send_message(phone, reply)
         return {"success": True}
 
 
@@ -363,8 +203,36 @@ async def _handle_text(phone: str, text: str, user, db: Session) -> dict:
         return {"success": True}
 
     if intent == "generate_image":
+        # If active draft at caption step — user wants to regenerate with different count
+        if active_draft and active_draft.current_step in ("caption_review", "image_selection", "post_type_selection"):
+            import re as _re2
+            num_match = _re2.search(r'([1-5])', text)
+            num_words = {"one":1,"two":2,"three":3,"four":4,"five":5}
+            new_count = None
+            if num_match:
+                new_count = int(num_match.group(1))
+            else:
+                for word, num in num_words.items():
+                    if word in text.lower():
+                        new_count = num
+                        break
+            if new_count:
+                draft_service.set_image_count(db, active_draft, new_count)
+                await send_message(phone, f"🔄 Regenerating with {new_count} image{'s' if new_count > 1 else ''}...")
+                return await _proceed_to_image_generation(phone, active_draft, user, db)
         subject = intent_data.get("subject") or text
-        return await _handle_generate_image_request(phone, subject, user, db)
+
+        # Step 1: Confirm what to generate
+        draft = draft_service.create_draft(db, user)
+        draft_service.update_extracted_data(db, draft, {"topic": subject})
+        draft_service.update_step(db, draft, "collecting_missing")
+        await send_message(phone, f"🖼 Generate images about: *{subject}*?")
+        await asyncio.sleep(0.3)
+        await send_buttons(phone, "Confirm topic:", [
+            {"id": "confirm_topic_yes", "title": "✅ Yes, generate"},
+            {"id": "discard_permanently", "title": "❌ No, cancel"},
+        ])
+        return {"success": True}
 
     if intent == "post_history":
         return await _handle_post_history(phone, user, db)
@@ -378,9 +246,10 @@ async def _handle_text(phone: str, text: str, user, db: Session) -> dict:
         return {"success": True}
 
     if intent == "greeting":
-        if active_draft:
+        if active_draft and active_draft.current_step not in ("done", "completed"):
             return await _show_resume_prompt(phone, active_draft, db)
-        await send_message(phone, "Hi! Send me a topic to create a post. Type *help* to see all features.")
+        reply = await _get_greeting_reply(text)
+        await send_message(phone, reply)
         return {"success": True}
 
     if intent == "retry" and active_draft:
@@ -423,9 +292,8 @@ async def _start_new_post(phone: str, text: str, user, db: Session) -> dict:
     7. Check connections → post
     """
     draft = draft_service.create_draft(db, user)
-    await send_message(phone, "✨ On it! Generating your post...")
 
-    # Extract entities silently
+    # Extract entities silently BEFORE sending any message
     extracted = await extract_entities(text)
     print(f"EXTRACTED: {extracted}")
 
@@ -440,6 +308,27 @@ async def _start_new_post(phone: str, text: str, user, db: Session) -> dict:
         elif "instagram" not in extracted["platforms"]:
             extracted["platforms"] = ["instagram"]
 
+    # Only save platforms if user explicitly mentioned a platform name
+    PLATFORM_KEYWORDS = ["instagram", "linkedin", "threads", "twitter",
+                         "insta", "fb", "facebook", "tiktok"]
+    user_mentioned_platform = any(kw in text.lower() for kw in PLATFORM_KEYWORDS)
+    if not user_mentioned_platform:
+        extracted.pop("platforms", None)  # Don't save platforms from Groq if not mentioned
+        print(f"PLATFORM: not mentioned in message — will ask user later")
+    else:
+        print(f"PLATFORM: extracted from message = {extracted.get('platforms')}")
+
+    # Check if platforms already locked by user's explicit list selection
+    import redis as _redis_lib
+    from app.core.config import settings as _s
+    try:
+        _r = _redis_lib.from_url(_s.REDIS_URL)
+        if _r.get(f"platforms_locked:{draft.id}"):
+            extracted.pop("platforms", None)
+            print("PLATFORM: locked by user selection — Groq platforms ignored")
+    except Exception:
+        pass
+
     # Save all extracted data
     if extracted:
         draft_service.update_extracted_data(db, draft, extracted)
@@ -450,18 +339,17 @@ async def _start_new_post(phone: str, text: str, user, db: Session) -> dict:
         await send_message(phone, "What would you like to post about?")
         return {"success": True}
 
-    # Always ask image count unless user explicitly mentioned a number in message
-    import re as _re
-    user_mentioned_count = bool(_re.search(r'\b[1-5]\b|\bone\b|\btwo\b|\bthree\b|\bfour\b|\bfive\b', text.lower()))
-    if user_mentioned_count and extracted.get("image_count"):
-        return await _proceed_to_image_generation(phone, draft, user, db)
-
-    # Ask how many images via list
+    # Show confirmation before proceeding
     topic = extracted.get("topic", "your post")
     draft_service.update_step(db, draft, "collecting_missing")
-    await send_message(phone, f"Got it! How many images for *{topic}*?")
-    await asyncio.sleep(0.3)
-    await _send_image_count_list(phone)
+    await send_buttons(
+        phone,
+        f"Got it! I\'ll create a post about *{topic}*. Shall I proceed?",
+        [
+            {"id": "confirm_topic", "title": "✅ Yes, Proceed"},
+            {"id": "edit_topic",    "title": "✏️ Edit Topic"},
+        ],
+    )
     return {"success": True}
 
 
@@ -478,9 +366,24 @@ async def _handle_draft_step(
         missing = get_missing_fields(extracted)
 
         if "topic" in missing:
-            # User is providing topic
+            # User is providing topic — save and show confirmation
             draft_service.update_extracted_data(db, draft, {"topic": text})
-            missing.remove("topic")
+            db.refresh(draft)
+            assets = draft.generated_assets or {}
+            # For video/image uploads, proceed directly to caption
+            if assets.get("video_url") or assets.get("user_image"):
+                missing.remove("topic")
+            else:
+                # For text posts — show confirmation
+                await send_buttons(
+                    phone,
+                    f"Got it! I\'ll create a post about *{text}*. Shall I proceed?",
+                    [
+                        {"id": "confirm_topic", "title": "✅ Yes, Proceed"},
+                        {"id": "edit_topic",    "title": "✏️ Edit Topic"},
+                    ],
+                )
+                return {"success": True}
 
         if "image_count" in missing:
             count = _extract_count(text)
@@ -501,7 +404,30 @@ async def _handle_draft_step(
                 await _send_image_count_buttons(phone)
             return {"success": True}
 
-        # All fields collected — proceed
+        # All fields collected
+        assets = draft.generated_assets or {}
+        topic = (draft.extracted_data or {}).get("topic", "")
+
+        # If user uploaded their own video — generate caption, don't create images
+        if assets.get("video_url"):
+            caption = await generate_caption(topic)
+            draft_service.set_caption(db, draft, caption)
+            draft_service.update_step(db, draft, "caption_review")
+            await send_message(phone, f"📝 *Caption:*\n\n{caption}")
+            await asyncio.sleep(0.5)
+            await _send_caption_actions(phone)
+            return {"success": True}
+
+        # If user uploaded their own image — generate caption, don't create new images
+        if assets.get("user_image") and assets.get("selected_images"):
+            caption = await generate_caption(topic)
+            draft_service.set_caption(db, draft, caption)
+            draft_service.update_step(db, draft, "caption_review")
+            await send_message(phone, f"📝 *Caption:*\n\n{caption}")
+            await asyncio.sleep(0.5)
+            await _send_caption_actions(phone)
+            return {"success": True}
+
         return await _proceed_to_image_generation(phone, draft, user, db)
 
     # ── Caption editing ───────────────────────────────
@@ -516,10 +442,19 @@ async def _handle_draft_step(
 
     # ── Schedule time input ───────────────────────────
     if step == "schedule_input":
-        scheduled_time = scheduler_service.parse_schedule_time(text)
+        result = scheduler_service.parse_schedule_time(text)
+        scheduled_time = result.get("utc") if isinstance(result, dict) else result
+        error = result.get("error") if isinstance(result, dict) else None
+        warning = result.get("warning") if isinstance(result, dict) else None
+
         if not scheduled_time:
-            await send_message(phone, "Couldn't understand that. Try 'tomorrow 9am' or 'after 2 hours'.")
+            msg = error or "Couldn't understand that. Try: 'tomorrow 9am', 'monday 5pm', 'after 2 hours'"
+            await send_message(phone, msg)
             return {"success": False}
+
+        if warning:
+            await send_message(phone, f"⚠️ {warning}")
+            await asyncio.sleep(0.5)
 
         draft_service.set_schedule(db, draft, scheduled_time)
         draft_service.update_step(db, draft, "ready_to_post")
@@ -581,6 +516,30 @@ async def _handle_button(phone: str, message: dict, user, db: Session) -> dict:
         return {"success": True}
 
     # ── Image count buttons ───────────────────────────
+    if button_id == "confirm_topic":
+        if not draft:
+            return {"success": True}
+        db.refresh(draft)
+        data = draft.extracted_data or {}
+        topic = data.get("topic", "your post")
+        # Check if count already mentioned
+        import re as _re4
+        image_count = data.get("image_count")
+        if image_count:
+            return await _proceed_to_image_generation(phone, draft, user, db)
+        # Ask image count
+        await send_message(phone, f"How many images for *{topic}*?")
+        await asyncio.sleep(0.3)
+        await _send_image_count_list(phone)
+        return {"success": True}
+
+    if button_id == "edit_topic":
+        if not draft:
+            return {"success": True}
+        draft_service.update_step(db, draft, "collecting_missing")
+        await send_message(phone, "What topic would you like to post about?")
+        return {"success": True}
+
     if button_id.startswith("img_count_"):
         count = int(button_id.replace("img_count_", ""))
         if not draft:
@@ -660,6 +619,17 @@ async def _handle_button(phone: str, message: dict, user, db: Session) -> dict:
         draft_service.update_step(db, draft, "post_type_selection")
         return {"success": True}
 
+    if button_id == "confirm_topic_yes":
+        if not draft:
+            return {"success": True}
+        db.refresh(draft)
+        topic = (draft.extracted_data or {}).get("topic", "your post")
+        draft_service.update_step(db, draft, "collecting_missing")
+        await send_message(phone, f"✨ Got it! How many images of *{topic}*?")
+        await asyncio.sleep(0.3)
+        await _send_image_count_list(phone)
+        return {"success": True}
+
     if button_id == "proceed_after_type":
         if not draft:
             return {"success": True}
@@ -676,8 +646,13 @@ async def _handle_button(phone: str, message: dict, user, db: Session) -> dict:
         if not draft:
             return {"success": True}
         await send_message(phone, "✨ Regenerating caption...")
-        topic = (draft.extracted_data or {}).get("topic", "")
-        instruction = (draft.extracted_data or {}).get("caption_instruction", "")
+        data = draft.extracted_data or {}
+        topic = data.get("topic") or ""
+        instruction = data.get("caption_instruction", "")
+        if not topic:
+            await send_message(phone, "What is this post about? Please tell me the topic first.")
+            draft_service.update_step(db, draft, "collecting_missing")
+            return {"success": True}
         caption = await generate_caption(f"{topic}. {instruction}".strip(". "))
         draft_service.set_caption(db, draft, caption)
         draft_service.update_step(db, draft, "caption_review")
@@ -733,6 +708,15 @@ async def _handle_button(phone: str, message: dict, user, db: Session) -> dict:
 
         saved = (draft.extracted_data or {}).get("platforms", [])
         print(f"PLATFORMS SAVED IN DB: {saved}")
+
+        # Lock platforms — prevent Groq from overwriting user's explicit selection
+        import redis as _redis_lib
+        from app.core.config import settings as _cfg
+        try:
+            _r = _redis_lib.from_url(_cfg.REDIS_URL)
+            _r.setex(f"platforms_locked:{draft.id}", 3600, "1")
+        except Exception as _e:
+            print(f"Platform lock error: {_e}")
 
         platforms_str = " + ".join(p.title() for p in saved)
         await send_message(phone, f"✅ Selected: *{platforms_str}*")
@@ -891,9 +875,37 @@ async def _handle_button(phone: str, message: dict, user, db: Session) -> dict:
     if button_id == "schedule_post":
         if not draft:
             return {"success": True}
+
+        # Check connections BEFORE asking for schedule time
+        db.refresh(draft)
+        platforms = (draft.extracted_data or {}).get("platforms", [])
+        from app.services.social_account_service import social_account_service
+        from app.core.config import settings as _settings
+        missing = social_account_service.get_missing_platforms(
+            db=db, whatsapp_number=user.number, platforms=platforms
+        )
+        if missing:
+            base = _settings.APP_BASE_URL
+            connect_urls = {
+                "instagram": f"{base}/oauth/meta/connect?whatsapp_number={user.number}",
+                "linkedin":  f"{base}/oauth/linkedin/connect?whatsapp_number={user.number}",
+                "threads":   f"{base}/oauth/threads/connect?whatsapp_number={user.number}",
+                "twitter":   f"{base}/oauth/twitter/connect?whatsapp_number={user.number}",
+            }
+            missing_str = " + ".join(p.title() for p in missing)
+            await send_message(
+                phone,
+                f"⚠️ Please connect these platforms before scheduling:\n*{missing_str}*"
+            )
+            for p in missing:
+                await send_message(phone, f"🔗 Connect {p.title()}:\n{connect_urls[p]}")
+            # Save intent to schedule so after connecting, we ask for time
+            draft_service.update_step(db, draft, "schedule_input")
+            draft_service.update_extracted_data(db, draft, {"pending_action": "schedule"})
+            return {"success": True}
+
         data = draft.extracted_data or {}
         if data.get("scheduled_time"):
-            # Already have schedule from extraction
             await _execute_schedule(phone, draft, user, db, data["scheduled_time"])
         else:
             draft_service.update_step(db, draft, "schedule_input")
@@ -959,8 +971,20 @@ async def _handle_user_video(phone: str, message: dict, user, db: Session) -> di
         draft_service.update_generated_assets(db, draft, {"video_url": video_url})
         draft_service.update_extracted_data(db, draft, {"post_type": "post"})
 
-        # Generate caption using topic or video caption text
-        topic = (draft.extracted_data or {}).get("topic") or caption_text or "social media video"
+        # Check if we know what the video is about
+        topic = (draft.extracted_data or {}).get("topic") or caption_text or ""
+
+        if not topic:
+            # Ask user what the video is about before generating caption
+            draft_service.update_step(db, draft, "collecting_missing")
+            await send_message(
+                phone,
+                "🎥 Got your video!\n\nWhat is this video about? I\'ll write a caption for it.\n\n"
+                "(e.g. \'product demo\', \'travel vlog\', \'cooking tutorial\')"
+            )
+            return {"success": True}
+
+        # Have topic — generate caption
         instruction = (draft.extracted_data or {}).get("caption_instruction", "")
         caption = await generate_caption(f"{topic}. {instruction}".strip(". "))
         draft_service.set_caption(db, draft, caption)
@@ -969,20 +993,6 @@ async def _handle_user_video(phone: str, message: dict, user, db: Session) -> di
         # Show caption
         await send_message(phone, f"📝 *Caption:*\n\n{caption}")
         await asyncio.sleep(0.5)
-
-        # Show platform/schedule info if already extracted
-        data = draft.extracted_data or {}
-        platforms = data.get("platforms")
-        schedule = data.get("schedule")
-        if platforms or schedule:
-            info = []
-            if platforms:
-                info.append(f"📱 Platform: {' + '.join(p.title() for p in platforms)}")
-            if schedule:
-                info.append(f"🕐 Schedule: {schedule}")
-            await send_message(phone, "\n".join(info))
-            await asyncio.sleep(0.3)
-
         await _send_caption_actions(phone)
 
     except Exception as e:
@@ -1110,15 +1120,24 @@ async def _handle_user_image(phone: str, message: dict, user, db: Session) -> di
         draft_service.set_selected_images(db, draft, [image_url])
         draft_service.set_generated_images(db, draft, [image_url])
 
-        # Generate caption
-        topic = (draft.extracted_data or {}).get("topic") or caption_text or "social media post"
+        # Check if we know what the image is about
+        topic = (draft.extracted_data or {}).get("topic") or caption_text or ""
+
+        await send_image(phone, image_url, "")
+        await asyncio.sleep(0.5)
+
+        if not topic:
+            # Ask user what the photo is about before generating caption
+            draft_service.update_step(db, draft, "collecting_missing")
+            await send_message(phone, "📸 Got your image!\n\nWhat is this photo about? I\'ll write a caption for it.\n\n(e.g. \'my cat\', \'product launch\', \'team meeting\')")
+            return {"success": True}
+
+        # Have topic — generate caption
         instruction = (draft.extracted_data or {}).get("caption_instruction", "")
         caption = await generate_caption(f"{topic}. {instruction}".strip(". "))
         draft_service.set_caption(db, draft, caption)
         draft_service.update_step(db, draft, "caption_review")
 
-        await send_image(phone, image_url, "")
-        await asyncio.sleep(0.5)
         await send_message(phone, f"📝 *Caption:*\n\n{caption}")
         await asyncio.sleep(0.5)
         await _send_caption_actions(phone)
@@ -1149,13 +1168,8 @@ async def _proceed_to_image_generation(phone: str, draft, user, db: Session) -> 
 
     draft_service.update_step(db, draft, "image_generation")
 
-    # Inform user about image count option
     if count == 1:
-        await send_message(
-            phone,
-            f"✨ Generating 1 image for *{topic}*...\n\n"
-            "💡 Tip: You can ask for up to 5 images, e.g. 'post about AI with 3 images'"
-        )
+        await send_message(phone, f"✨ Generating 1 image for *{topic}*...")
     else:
         await send_message(phone, f"✨ Generating {count} images for *{topic}*...")
 
@@ -1172,10 +1186,10 @@ async def _proceed_to_image_generation(phone: str, draft, user, db: Session) -> 
     draft_service.set_selected_images(db, draft, images)  # default = all selected
     draft_service.update_step(db, draft, "caption_review")
 
-    # Show all images first
+    # Show all images first — 1.5s delay to prevent WhatsApp out-of-order delivery
     for i, img_url in enumerate(images):
         await send_image(phone, img_url, f"Image {i+1}" if count > 1 else "")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.5)
 
     # Then caption and preview
     preview_lines = [f"📝 *Caption:*\n{caption}"]
@@ -1387,18 +1401,29 @@ async def _check_connections_and_proceed(phone: str, draft, user, db: Session) -
     # All connected
     data = draft.extracted_data or {}
     platforms_str = " + ".join(p.title() for p in platforms)
-    schedule_hint = f"\n\nDetected schedule: {data['scheduled_time']}" if data.get("scheduled_time") else ""
+    schedule = data.get("schedule") or data.get("scheduled_time")
 
     draft_service.update_step(db, draft, "ready_to_post")
 
-    await send_buttons(
-        phone,
-        f"✅ All set! Ready to post on {platforms_str}:{schedule_hint}",
-        [
-            {"id": "post_now",      "title": "🚀 Post Now"},
-            {"id": "schedule_post", "title": "🕐 Schedule"},
-        ],
-    )
+    if schedule:
+        # Schedule already extracted from message — ask for time confirmation
+        await send_buttons(
+            phone,
+            f"✅ All set! Ready to post on {platforms_str}.",
+            [
+                {"id": "post_now",      "title": "🚀 Post Now"},
+                {"id": "schedule_post", "title": "🕐 Schedule"},
+            ],
+        )
+    else:
+        await send_buttons(
+            phone,
+            f"✅ All set! Ready to post on {platforms_str}.",
+            [
+                {"id": "post_now",      "title": "🚀 Post Now"},
+                {"id": "schedule_post", "title": "🕐 Schedule"},
+            ],
+        )
     return {"success": True}
 
 
@@ -1484,7 +1509,10 @@ async def _execute_schedule(phone: str, draft, user, db: Session, scheduled_time
     assets = draft.generated_assets or {}
     platforms = data.get("platforms", [])
     selected_images = assets.get("selected_images", [])
+    video_url = assets.get("video_url")
     caption = draft_service.get_effective_caption(draft)
+
+    all_urls = [video_url] if video_url else selected_images
 
     await post_service.create_and_dispatch(
         db=db,
@@ -1492,7 +1520,7 @@ async def _execute_schedule(phone: str, draft, user, db: Session, scheduled_time
         draft=draft,
         platforms=platforms,
         caption=caption,
-        image_urls=selected_images,
+        image_urls=all_urls,
         scheduled_time=scheduled_time,
     )
 
@@ -1555,21 +1583,26 @@ async def _proceed_after_post_type(phone: str, draft, user, db: Session) -> dict
 
     draft_service.update_step(db, draft, "platform_selection")
 
-    if schedule:
-        scheduled_time = scheduler_service.parse_schedule_time(str(schedule))
-        if scheduled_time:
-            return await _execute_schedule(phone, draft, user, db, scheduled_time)
-
+    # Always check connections first — whether posting now or scheduling
     return await _check_connections_and_proceed(phone, draft, user, db)
 
 
-async def _handle_generate_image_request(phone: str, subject: str, user, db: Session) -> dict:
-    """User asks to generate an image — generate it and ask if they want to post it."""
-    await send_message(phone, f"🎨 Generating image of: {subject}...")
+async def _handle_generate_image_request(phone: str, subject: str, user, db: Session, count: int = 0) -> dict:
+    """User asks to generate an image — ask count first, then generate."""
+    if not count:
+        # Ask how many images first
+        draft = draft_service.create_draft(db, user)
+        draft_service.update_extracted_data(db, draft, {"topic": subject})
+        draft_service.update_step(db, draft, "collecting_missing")
+        await send_message(phone, f"How many images of *{subject}*?")
+        await asyncio.sleep(0.3)
+        await _send_image_count_list(phone)
+        return {"success": True}
+    await send_message(phone, f"🎨 Generating {count} image{'s' if count > 1 else ''} of: {subject}...")
 
     try:
         from app.integrations.image_provider import generate_images
-        images = generate_images(subject, 1)
+        images = generate_images(subject, count)
         image_url = images[0] if images else None
 
         if not image_url:
@@ -1714,17 +1747,40 @@ async def _resume_draft(phone: str, draft, user, db: Session) -> dict:
     await send_message(phone, "✅ Resuming your draft...")
 
     if step == "entity_extraction" or step == "collecting_missing":
-        missing = get_missing_fields(draft.extracted_data or {})
-        if missing:
-            from app.services.entity_extraction_service import build_missing_fields_message
-            await send_message(phone, build_missing_fields_message(missing))
-            if missing == ["image_count"]:
-                await _send_image_count_buttons(phone)
+        assets = draft.generated_assets or {}
+        data = draft.extracted_data or {}
+        topic = data.get("topic", "")
+        # If no topic — ask for it
+        if not topic:
+            await send_message(phone, "What would you like to post about?")
+        # If has video/image — generate caption not images
+        elif assets.get("video_url") or (assets.get("user_image") and assets.get("selected_images")):
+            caption = await generate_caption(topic)
+            draft_service.set_caption(db, draft, caption)
+            draft_service.update_step(db, draft, "caption_review")
+            await send_message(phone, f"📝 *Caption:*\n\n{caption}")
+            await asyncio.sleep(0.5)
+            await _send_caption_actions(phone)
+        # Otherwise ask image count
         else:
-            await _proceed_to_image_generation(phone, draft, user, db)
+            await send_message(phone, f"✨ Got it! How many images for *{topic}*?")
+            await asyncio.sleep(0.3)
+            await _send_image_count_list(phone)
 
     elif step == "image_generation":
-        await _proceed_to_image_generation(phone, draft, user, db)
+        # Check if image count was set — if not, ask first
+        image_count = (draft.extracted_data or {}).get("image_count")
+        assets = draft.generated_assets or {}
+        has_video = bool(assets.get("video_url"))
+        has_user_image = bool(assets.get("user_image"))
+        if not image_count and not has_video and not has_user_image:
+            topic = (draft.extracted_data or {}).get("topic", "your post")
+            draft_service.update_step(db, draft, "collecting_missing")
+            await send_message(phone, f"How many images for *{topic}*?")
+            await asyncio.sleep(0.3)
+            await _send_image_count_list(phone)
+        else:
+            await _proceed_to_image_generation(phone, draft, user, db)
 
     elif step == "image_selection":
         images = assets.get("generated_images", [])
@@ -1809,135 +1865,7 @@ async def _send_platform_selection_and_return(phone: str, draft) -> dict:
 # ──────────────────────────────────────────────────────────────
 
 
-async def _handle_generate_image_request(phone: str, subject: str, user, db: Session) -> dict:
-    """User asks to generate an image — generate it and ask if they want to post it."""
-    await send_message(phone, f"🎨 Generating image of: {subject}...")
 
-    try:
-        images = generate_images(subject, 1)
-        if not images:
-            await send_message(phone, "Could not generate image. Please try again.")
-            return {"success": False}
-
-        image_url = images[0]
-        await send_image(phone, image_url, subject)
-        await asyncio.sleep(0.5)
-
-        # Create draft with this image pre-selected
-        draft = draft_service.create_draft(db, user)
-        draft_service.update_extracted_data(db, draft, {"topic": subject, "image_count": 1})
-        draft_service.set_generated_images(db, draft, [image_url])
-        draft_service.set_selected_images(db, draft, [image_url])
-        draft_service.update_generated_assets(db, draft, {"user_image": True})
-
-        await send_buttons(
-            phone,
-            "Want to post this image?",
-            [
-                {"id": "caption_proceed", "title": "📤 Yes, Post This"},
-                {"id": "regenerate_imgs", "title": "🔄 Generate New"},
-                {"id": "discard_permanently", "title": "🗑 No Thanks"},
-            ],
-        )
-        draft_service.update_step(db, draft, "caption_review")
-
-        # Generate caption in background
-        caption = await generate_caption(subject)
-        draft_service.set_caption(db, draft, caption)
-
-    except Exception as e:
-        print(f"IMAGE GEN ERROR: {e}")
-        await send_message(phone, "Could not generate image. Please try again.")
-
-    return {"success": True}
-
-
-async def _handle_post_history(phone: str, user, db: Session) -> dict:
-    """Show user's recent posts."""
-    from app.models.user_post import UserPost
-    from app.models.publish_job import PublishJob
-
-    posts = (
-        db.query(UserPost)
-        .filter(
-            UserPost.user_id == user.id,
-            UserPost.status == "published",
-        )
-        .order_by(UserPost.published_at.desc())
-        .limit(5)
-        .all()
-    )
-
-    if not posts:
-        await send_message(
-            phone,
-            "You haven't posted anything yet.\n\nSend me a topic to create your first post!"
-        )
-        return {"success": True}
-
-    lines = ["📊 *Your recent posts:*\n"]
-    for i, post in enumerate(posts, 1):
-        caption_preview = (post.caption or "")[:50]
-        if len(post.caption or "") > 50:
-            caption_preview += "..."
-        date = post.published_at.strftime("%d %b %Y") if post.published_at else "Unknown"
-        platforms = post.platform_type or "Unknown"
-        lines.append(f"{i}. {caption_preview}\n   📱 {platforms} • 📅 {date}")
-
-    await send_message(phone, "\n\n".join(lines))
-    return {"success": True}
-
-
-async def _handle_cancel_schedule(phone: str, user, db: Session) -> dict:
-    """Show pending scheduled posts and allow cancellation."""
-    from app.models.publish_job import PublishJob
-    from datetime import datetime
-
-    jobs = (
-        db.query(PublishJob)
-        .filter(
-            PublishJob.user_id == user.id,
-            PublishJob.status == "pending",
-            PublishJob.scheduled_time != None,
-            PublishJob.scheduled_time > datetime.utcnow(),
-        )
-        .order_by(PublishJob.scheduled_time.asc())
-        .all()
-    )
-
-    if not jobs:
-        await send_message(phone, "You have no scheduled posts.")
-        return {"success": True}
-
-    # Group by draft
-    seen_drafts = {}
-    for job in jobs:
-        key = str(job.draft_id or job.post_id)
-        if key not in seen_drafts:
-            seen_drafts[key] = []
-        seen_drafts[key].append(job)
-
-    lines = ["🗓 *Your scheduled posts:*\n"]
-    cancel_options = []
-
-    for i, (key, job_group) in enumerate(seen_drafts.items(), 1):
-        first_job = job_group[0]
-        platforms = " + ".join(j.platform.title() for j in job_group)
-        ist_time = scheduler_service.format_ist(first_job.scheduled_time)
-        lines.append(f"{i}. 📱 {platforms}\n   🕐 {ist_time}")
-        if len(cancel_options) < 3:
-            cancel_options.append({
-                "id": f"cancel_job_{key}",
-                "title": f"Cancel #{i}"
-            })
-
-    await send_message(phone, "\n\n".join(lines))
-    await asyncio.sleep(0.5)
-
-    if cancel_options:
-        await send_buttons(phone, "Which post to cancel?", cancel_options)
-
-    return {"success": True}
 
 
 async def _send_image_count_buttons(phone: str):

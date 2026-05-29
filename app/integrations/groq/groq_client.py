@@ -15,19 +15,20 @@ async def generate_caption(prompt: str) -> str:
             {
                 "role": "system",
                 "content": (
-                    "You are a social media expert. "
-                    "Your job is to write ONE single viral caption for a social media post. "
+                    "You are a social media expert who writes captions strictly about the given topic.\n"
                     "Rules:\n"
+                    "- Write ONE caption ONLY about the specific topic provided.\n"
                     "- Output ONLY the caption text. Nothing else.\n"
                     "- NO explanations, NO image descriptions, NO numbering, NO options.\n"
-                    "- Include 3-5 relevant hashtags at the end.\n"
-                    "- Keep it under 400 characters total.\n"
-                    "- Make it engaging and punchy.\n"
-                    "If the user message contains words like 'generate images' or numbers, "
-                    "ignore them and write a caption about the TOPIC mentioned."
+                    "- Include 3-5 relevant hashtags at the END only.\n"
+                    "- Keep it under 300 characters total.\n"
+                    "- Make it engaging, specific to the topic, and insightful.\n"
+                    "- Never write generic captions like 'connecting the world' unless that is the topic.\n"
+                    "- If topic is about a person, place, technology or event — write specifically about that.\n"
+                    "- Ignore any words like 'generate', 'images', 'post about' in the prompt — focus on the TOPIC only."
                 ),
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": f"Topic: {prompt}"},
         ],
     }
 
@@ -42,10 +43,8 @@ async def generate_caption(prompt: str) -> str:
 
     caption = data["choices"][0]["message"]["content"].strip()
 
-    # Safety trim — remove any accidental multi-caption output
-    # If it contains "Image 1:" or "Option 1:" patterns, take only first line block
-    if "Image 1:" in caption or "Option 1:" in caption or "*Image" in caption:
-        # Take only the first sentence/paragraph
+    # Remove multi-caption patterns
+    if any(x in caption for x in ["Image 1:", "Option 1:", "*Image", "Caption 1:"]):
         lines = [l.strip() for l in caption.split("\n") if l.strip()]
         caption = lines[0] if lines else caption
 

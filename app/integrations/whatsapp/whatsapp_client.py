@@ -11,9 +11,23 @@ def _base_url() -> str:
 
 
 def _headers() -> dict:
-    """Read token fresh every call so token refresh works without restart."""
+    """Read token fresh on every call by reloading settings from env."""
+    import os
+    from dotenv import dotenv_values
+    # Find .env by walking up from current file
+    current = os.path.abspath(__file__)
+    token = None
+    for _ in range(6):
+        current = os.path.dirname(current)
+        env_file = os.path.join(current, ".env")
+        if os.path.exists(env_file):
+            vals = dotenv_values(env_file)
+            token = vals.get("WHATSAPP_ACCESS_TOKEN")
+            if token:
+                break
+    token = token or os.getenv("WHATSAPP_ACCESS_TOKEN") or settings.WHATSAPP_ACCESS_TOKEN
     return {
-        "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
@@ -83,7 +97,7 @@ def send_message_sync(to: str, text: str) -> dict:
     }
     resp = requests.post(_base_url(), headers=_headers(), json=payload, timeout=30)
     print("WA send_message_sync:", resp.status_code)
-    return resp.json()
+    return resp.status_code
 
 
 def send_buttons_sync(to: str, body_text: str, buttons: list) -> dict:
@@ -114,10 +128,12 @@ async def send_list(to: str, body: str, button_label: str, sections: list) -> di
     """
     payload = {
         "messaging_product": "whatsapp",
+        "recipient_type": "individual",
         "to": to,
         "type": "interactive",
         "interactive": {
             "type": "list",
+            "header": {"type": "text", "text": "Select an option"},
             "body": {"text": body},
             "action": {
                 "button": button_label,
